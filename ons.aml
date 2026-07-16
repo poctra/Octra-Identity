@@ -1,0 +1,884 @@
+// ─────────────────────────────────────────────────────────────────────────
+//
+//    ██████╗ ███╗   ██╗███████╗
+//   ██╔═══██╗████╗  ██║██╔════╝
+//   ██║   ██║██╔██╗ ██║███████╗
+//   ██║   ██║██║╚██╗██║╚════██║
+//   ╚██████╔╝██║ ╚████║███████║
+//    ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+//
+//   octra name service  ·  by https://octra.id
+//
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Octra Name Service (ONS) — public namespace only.
+//
+// Design notes:
+//   - Ownership is caller-based so direct wallets and contract multisigs can
+//     manage names through the same authorization rule.
+//   - Single namespace: plaintext label -> (destination, owner).
+//   - Epoch-based expiry. Admin-configurable grace period.
+//   - Built-in marketplace (list / cancel / buy) with fee split and an
+//     on-chain enumeration index.
+//   - Per-owner enumeration so any dApp can list "names owned by addr" in a
+//     single view call — no receipt scanning.
+//
+// Reserved AML parameter names avoided: cipher / pubkey / caller / origin /
+// value / self / self_addr.
+//
+// Constructor params: [price_per_year_ou, grace_epochs]
+
+contract OctraNameService {
+
+  state {
+    // Admin surface
+    owner:          address
+    pending_owner:  address
+    paused:         bool
+
+    // Economic configuration
+    price_per_year:  int     // OU per year of registration
+    fee_bps:         int     // marketplace fee, basis points (100 = 1%)
+    grace_epochs:    int     // grace epochs after expiry
+    fees_collected:  int
+
+    // Stats
+    total_names:     int
+
+    // Registry — key is the lowercase label
+    name_owner:         map[string]address
+    name_destination:   map[string]string    // plain oct address
+    name_expiry:        map[string]int       // absolute epoch
+    name_registered_at: map[string]int
+    name_generation:    map[string]int       // increments on fresh registration/release
+
+    // Marketplace
+    name_listing_price:  map[string]int      // 0 = not listed
+    name_listing_seller: map[string]address
+
+    // Parent-owned subdomains. A subdomain has no independent expiry:
+    // it resolves only while the parent name is active, and its generation
+    // must match the parent generation so expired/re-registered names do not
+    // inherit stale child records.
+    sub_destination:   map[string]map[string]string
+    sub_registered_at: map[string]map[string]int
+    sub_generation:    map[string]map[string]int
+    sub_keys:          map[string]map[int]string
+    sub_index:         map[string]map[string]int
+    sub_index_generation: map[string]map[string]int
+    sub_count:         map[string]int
+    sub_count_generation: map[string]int
+
+    // Listing enumeration index (swap-and-pop)
+    //   listing_keys[i]      = label at slot i       (0 <= i < count)
+    //   listing_index[label] = slot + 1              (0 = not listed)
+    //   listing_count        = number of active listings
+    listing_keys:  map[int]string
+    listing_index: map[string]int
+    listing_count: int
+
+    // Per-owner enumeration
+    //   owner_keys[owner][i]     = label at slot i
+    //   owner_index[owner][label] = slot + 1 (0 = not owned)
+    //   owner_count[owner]       = number of labels owned
+    owner_keys:  map[address]map[int]string
+    owner_index: map[address]map[string]int
+    owner_count: map[address]int
+
+    // Reverse resolution — primary name per holder
+    reverse_primary: map[address]string
+  }
+
+  // ─── Events ─────────────────────────────────────────────────────────────
+
+  event NameRegistered(label: string, new_owner: address, years: int, expiry: int)
+  event NameRenewed(label: string, new_expiry: int, years: int)
+  event NameTransferred(label: string, old_owner: address, new_owner: address)
+  event NameReleased(label: string, old_owner: address)
+  event RecordUpdated(label: string, resolver: string)
+  event PrimarySet(holder: address, label: string)
+  event PrimaryCleared(holder: address)
+  event SubRecordSet(parent: string, sub: string, resolver: string)
+  event SubdomainReleased(parent: string, sub: string)
+  event NameListed(label: string, seller: address, price: int)
+  event NameUnlisted(label: string)
+  event NameBought(label: string, seller: address, buyer: address, price: int, fee: int)
+  event Paused(by: address)
+  event Unpaused(by: address)
+  event PriceUpdated(new_price: int)
+  event FeeUpdated(new_bps: int)
+  event GracePeriodUpdated(new_grace: int)
+  event FeesWithdrawn(to: address, amount: int)
+  event OwnershipProposed(current_owner: address, next_owner: address)
+  event OwnershipAccepted(old_owner: address, new_owner: address)
+
+  // ─── Constructor ────────────────────────────────────────────────────────
+
+  constructor(price_per_year: int, grace_eps: int) {
+    require(price_per_year > 0, "price must be > 0")
+    require(grace_eps >= 0, "grace must be >= 0")
+    self.owner          = origin
+    self.pending_owner  = ""
+    self.paused         = false
+    self.price_per_year = price_per_year
+    self.fee_bps        = 250
+    self.grace_epochs   = grace_eps
+    self.fees_collected = 0
+    self.total_names    = 0
+    self.listing_count  = 0
+    seed_reserved_name("root")
+    self.reverse_primary[self.owner] = "root"
+    emit PrimarySet(self.owner, "root")
+    seed_reserved_name("alex")
+    seed_reserved_name("lambda")
+    seed_reserved_name("lambda0xe")
+    seed_reserved_name("bunch")
+    seed_reserved_name("octra")
+    seed_reserved_name("poctra")
+  }
+
+  // ─── Internal guards ────────────────────────────────────────────────────
+
+  private fn only_admin() {
+    require(caller == self.owner, "not admin")
+  }
+
+  private fn not_paused() {
+    require(!self.paused, "paused")
+  }
+
+  private fn has_valid_label_chars(label: string): bool {
+    let allowed = "abcdefghijklmnopqrstuvwxyz0123456789-"
+    let n = len(label)
+    if n == 0 { return false }
+    if substr(label, 0, 1) == "-" { return false }
+    if substr(label, n - 1, 1) == "-" { return false }
+    let i = 0
+    while i < n {
+      let ch = substr(label, i, 1)
+      if index_of(allowed, ch) < 0 { return false }
+      i = i + 1
+    }
+    return true
+  }
+
+  private fn is_valid_label_value(label: string): bool {
+    let n = len(label)
+    if n < 3 { return false }
+    if n > 63 { return false }
+    return has_valid_label_chars(label)
+  }
+
+  private fn require_valid_label(label: string) {
+    let n = len(label)
+    require(n >= 3, "label too short")
+    require(n <= 63, "label too long")
+    require(has_valid_label_chars(label), "invalid label char")
+  }
+
+  private fn is_valid_sub_label_value(label: string): bool {
+    let n = len(label)
+    if n < 1 { return false }
+    if n > 63 { return false }
+    return has_valid_label_chars(label)
+  }
+
+  private fn require_valid_sub_label(label: string) {
+    let n = len(label)
+    require(n >= 1, "sub label too short")
+    require(n <= 63, "sub label too long")
+    require(has_valid_label_chars(label), "invalid sub label char")
+  }
+
+  private fn is_reserved_name(label: string): bool {
+    if label == "root" { return true }
+    if label == "lambda" { return true }
+    if label == "lambda0xe" { return true }
+    if label == "bunch" { return true }
+    if label == "alex" { return true }
+    if label == "octra" { return true }
+    if label == "poctra" { return true }
+    return false
+  }
+
+  private fn is_managed_reserved_name(label: string): bool {
+    if label == "root" { return true }
+    if label == "alex" { return true }
+    if label == "lambda" { return true }
+    if label == "lambda0xe" { return true }
+    if label == "bunch" { return true }
+    if label == "octra" { return true }
+    if label == "poctra" { return true }
+    return false
+  }
+
+  private fn reserved_expiry_epoch(): int {
+    return epoch + (1000 * 3153600)
+  }
+
+  private fn require_reserved_admin(label: string) {
+    if is_reserved_name(label) {
+      require(caller == self.owner, "reserved name")
+    }
+  }
+
+  private fn require_publicly_transferable(label: string) {
+    require(!is_reserved_name(label), "reserved name locked")
+  }
+
+  private fn require_valid_years(years: int) {
+    require(years >= 1, "years < 1")
+    require(years <= 10, "years > 10")
+  }
+
+  private fn require_active_parent_owner(parent_label: string) {
+    require_valid_label(parent_label)
+    require(caller == self.name_owner[parent_label], "not parent owner")
+    require(epoch <= self.name_expiry[parent_label], "parent expired")
+  }
+
+  // A name is free iff never registered OR past grace period.
+  private fn is_name_free(label: string): bool {
+    let exp = self.name_expiry[label]
+    if exp == 0 { return true }
+    return epoch > exp + self.grace_epochs
+  }
+
+  private fn has_active_primary(holder: address): bool {
+    let label = self.reverse_primary[holder]
+    if label == "" { return false }
+    if self.name_owner[label] != holder { return false }
+    if epoch > self.name_expiry[label] { return false }
+    return true
+  }
+
+  private fn clear_listing_and_reverse(label: string, prev_owner: address) {
+    listing_remove(label)
+    self.name_listing_price[label]  = 0
+    self.name_listing_seller[label] = ""
+    owner_index_remove(prev_owner, label)
+    if self.reverse_primary[prev_owner] == label {
+      self.reverse_primary[prev_owner] = ""
+    }
+  }
+
+  private fn sub_index_add(parent_label: string, sub_label: string) {
+    let generation = self.name_generation[parent_label]
+    if self.sub_count_generation[parent_label] != generation {
+      self.sub_count[parent_label] = 0
+      self.sub_count_generation[parent_label] = generation
+    }
+    let pos = self.sub_index[parent_label][sub_label]
+    if self.sub_index_generation[parent_label][sub_label] == generation && pos > 0 { return }
+    let slot = self.sub_count[parent_label]
+    self.sub_keys[parent_label][slot] = sub_label
+    self.sub_index[parent_label][sub_label] = slot + 1
+    self.sub_index_generation[parent_label][sub_label] = generation
+    self.sub_count[parent_label] = slot + 1
+  }
+
+  private fn sub_index_remove(parent_label: string, sub_label: string) {
+    let generation = self.name_generation[parent_label]
+    if self.sub_count_generation[parent_label] != generation { return }
+    if self.sub_index_generation[parent_label][sub_label] != generation { return }
+    let pos = self.sub_index[parent_label][sub_label]
+    if pos <= 0 { return }
+
+    let slot = pos - 1
+    let last_slot = self.sub_count[parent_label] - 1
+    let last_key = self.sub_keys[parent_label][last_slot]
+
+    self.sub_keys[parent_label][slot] = last_key
+    self.sub_index[parent_label][last_key] = slot + 1
+    self.sub_index_generation[parent_label][last_key] = generation
+
+    self.sub_keys[parent_label][last_slot] = ""
+    self.sub_index[parent_label][sub_label] = 0
+    self.sub_index_generation[parent_label][sub_label] = 0
+    self.sub_count[parent_label] = last_slot
+  }
+
+  // ─── Listing index helpers (swap-and-pop) ───────────────────────────────
+
+  private fn listing_add(label: string) {
+    let pos = self.listing_index[label]
+    if pos > 0 { return }
+    let slot = self.listing_count
+    self.listing_keys[slot]    = label
+    self.listing_index[label]  = slot + 1
+    self.listing_count         = slot + 1
+  }
+
+  private fn listing_remove(label: string) {
+    let pos = self.listing_index[label]
+    if pos == 0 { return }
+    let slot     = pos - 1
+    let last_idx = self.listing_count - 1
+
+    if slot != last_idx {
+      let tail = self.listing_keys[last_idx]
+      self.listing_keys[slot]  = tail
+      self.listing_index[tail] = slot + 1
+    }
+
+    self.listing_keys[last_idx] = ""
+    self.listing_index[label]   = 0
+    self.listing_count          = last_idx
+  }
+
+  // ─── Per-owner enumeration helpers ──────────────────────────────────────
+
+  private fn owner_index_add(holder: address, label: string) {
+    let pos = self.owner_index[holder][label]
+    if pos > 0 { return }
+    let slot = self.owner_count[holder]
+    self.owner_keys[holder][slot]   = label
+    self.owner_index[holder][label] = slot + 1
+    self.owner_count[holder]        = slot + 1
+  }
+
+  private fn owner_index_remove(holder: address, label: string) {
+    let pos = self.owner_index[holder][label]
+    if pos == 0 { return }
+    let slot     = pos - 1
+    let last_idx = self.owner_count[holder] - 1
+
+    if slot != last_idx {
+      let tail = self.owner_keys[holder][last_idx]
+      self.owner_keys[holder][slot]  = tail
+      self.owner_index[holder][tail] = slot + 1
+    }
+
+    self.owner_keys[holder][last_idx] = ""
+    self.owner_index[holder][label]   = 0
+    self.owner_count[holder]          = last_idx
+  }
+
+  private fn seed_reserved_name(label: string) {
+    self.name_generation[label] += 1
+    self.name_owner[label] = self.owner
+    self.name_destination[label] = self.owner
+    self.name_expiry[label] = reserved_expiry_epoch()
+    self.name_registered_at[label] = epoch
+    self.total_names += 1
+    owner_index_add(self.owner, label)
+  }
+
+  private fn set_name_record(label: string, resolver: string) {
+    require_valid_label(label)
+    require(caller == self.name_owner[label], "not owner")
+    require(epoch <= self.name_expiry[label], "expired")
+    assert_address(resolver)
+    self.name_destination[label] = resolver
+    emit RecordUpdated(label, resolver)
+  }
+
+  private fn migrate_reserved_admin_name(label: string, old_admin: address, new_admin: address) {
+    if self.name_owner[label] != old_admin { return }
+    clear_listing_and_reverse(label, old_admin)
+    self.name_owner[label] = new_admin
+    owner_index_add(new_admin, label)
+    if self.name_destination[label] == old_admin {
+      self.name_destination[label] = new_admin
+      emit RecordUpdated(label, new_admin)
+    }
+    emit NameTransferred(label, old_admin, new_admin)
+  }
+
+  // ─── Admin ──────────────────────────────────────────────────────────────
+
+  fn pause(): bool {
+    only_admin()
+    self.paused = true
+    emit Paused(caller)
+    return true
+  }
+
+  fn unpause(): bool {
+    only_admin()
+    self.paused = false
+    emit Unpaused(caller)
+    return true
+  }
+
+  fn set_registration_price(new_price: int): bool {
+    only_admin()
+    require(new_price > 0, "price must be > 0")
+    self.price_per_year = new_price
+    emit PriceUpdated(new_price)
+    return true
+  }
+
+  fn set_marketplace_fee_bps(new_bps: int): bool {
+    only_admin()
+    require(new_bps >= 0 && new_bps <= 1000, "bps out of range")
+    self.fee_bps = new_bps
+    emit FeeUpdated(new_bps)
+    return true
+  }
+
+  fn set_grace_period(new_grace: int): bool {
+    only_admin()
+    require(new_grace >= 0, "grace must be >= 0")
+    self.grace_epochs = new_grace
+    emit GracePeriodUpdated(new_grace)
+    return true
+  }
+
+  nonreentrant fn withdraw_fees(to: address): bool {
+    only_admin()
+    assert_address(to)
+    let amount = self.fees_collected
+    require(amount > 0, "no fees")
+    self.fees_collected = 0
+    require(transfer(to, amount), "transfer failed")
+    emit FeesWithdrawn(to, amount)
+    return true
+  }
+
+  fn propose_ownership(next_owner: address): bool {
+    only_admin()
+    assert_address(next_owner)
+    self.pending_owner = next_owner
+    emit OwnershipProposed(self.owner, next_owner)
+    return true
+  }
+
+  fn accept_ownership(): bool {
+    require(caller == self.pending_owner, "not pending owner")
+    let old = self.owner
+    self.owner = self.pending_owner
+    self.pending_owner = ""
+    migrate_reserved_admin_name("root", old, self.owner)
+    migrate_reserved_admin_name("alex", old, self.owner)
+    migrate_reserved_admin_name("lambda", old, self.owner)
+    migrate_reserved_admin_name("lambda0xe", old, self.owner)
+    migrate_reserved_admin_name("bunch", old, self.owner)
+    migrate_reserved_admin_name("octra", old, self.owner)
+    migrate_reserved_admin_name("poctra", old, self.owner)
+    if !has_active_primary(self.owner) && self.name_owner["root"] == self.owner {
+      self.reverse_primary[self.owner] = "root"
+      emit PrimarySet(self.owner, "root")
+    }
+    emit OwnershipAccepted(old, self.owner)
+    return true
+  }
+
+  // ─── Name lifecycle ─────────────────────────────────────────────────────
+
+  payable fn register_name(label: string, destination_val: string, years: int): bool {
+    not_paused()
+    require_valid_label(label)
+    require_reserved_admin(label)
+    require_valid_years(years)
+    require(is_name_free(label), "not available")
+    assert_address(destination_val)
+
+    let cost = self.price_per_year * years
+    require(value == cost, "wrong payment")
+    self.fees_collected += cost
+
+    // Clean up prior expired registration (index + reverse primary).
+    let prev = self.name_owner[label]
+    if prev != "" && prev != "0" {
+      clear_listing_and_reverse(label, prev)
+      self.total_names -= 1
+    }
+
+    let new_expiry = epoch + (years * 3153600)
+    self.name_generation[label] += 1
+
+    self.name_owner[label]         = caller
+    self.name_destination[label]   = destination_val
+    self.name_expiry[label]        = new_expiry
+    self.name_registered_at[label] = epoch
+    self.total_names += 1
+    owner_index_add(caller, label)
+    if !has_active_primary(caller) {
+      self.reverse_primary[caller] = label
+      emit PrimarySet(caller, label)
+    }
+
+    emit NameRegistered(label, caller, years, new_expiry)
+    emit RecordUpdated(label, destination_val)
+    return true
+  }
+
+  payable fn renew_name(label: string, years: int): bool {
+    not_paused()
+    require_valid_label(label)
+    require_valid_years(years)
+    require(caller == self.name_owner[label], "not owner")
+
+    let cur_expiry = self.name_expiry[label]
+    require(cur_expiry > 0, "not registered")
+    require(epoch <= cur_expiry + self.grace_epochs, "past grace")
+
+    let cost = self.price_per_year * years
+    require(value == cost, "wrong payment")
+    self.fees_collected += cost
+
+    let base_exp = cur_expiry
+    if epoch > cur_expiry { base_exp = epoch }
+    let new_expiry = base_exp + (years * 3153600)
+    self.name_expiry[label] = new_expiry
+
+    emit NameRenewed(label, new_expiry, years)
+    return true
+  }
+
+  fn set_record(label: string, resolver: string): bool {
+    not_paused()
+    set_name_record(label, resolver)
+    return true
+  }
+
+  fn transfer_name(label: string, new_owner: address): bool {
+    not_paused()
+    require_publicly_transferable(label)
+    require(caller == self.name_owner[label], "not owner")
+    assert_address(new_owner)
+    require(new_owner != caller, "same owner")
+    require(epoch <= self.name_expiry[label], "expired")
+
+    clear_listing_and_reverse(label, caller)
+    self.name_owner[label] = new_owner
+    owner_index_add(new_owner, label)
+
+    emit NameTransferred(label, caller, new_owner)
+    return true
+  }
+
+  fn transfer_reserved_name(label: string, new_owner: address, new_destination: string): bool {
+    not_paused()
+    only_admin()
+    require(is_managed_reserved_name(label), "not managed reserved")
+    assert_address(new_owner)
+
+    let dest = new_destination
+    if dest == "" { dest = new_owner }
+    if dest == "0" { dest = new_owner }
+    assert_address(dest)
+
+    let prev_owner = self.name_owner[label]
+    require(prev_owner != "" && prev_owner != "0", "reserved not seeded")
+
+    if prev_owner != new_owner {
+      clear_listing_and_reverse(label, prev_owner)
+      self.name_owner[label] = new_owner
+      owner_index_add(new_owner, label)
+      emit NameTransferred(label, prev_owner, new_owner)
+    }
+
+    self.name_destination[label] = dest
+    self.name_expiry[label] = reserved_expiry_epoch()
+    emit RecordUpdated(label, dest)
+    return true
+  }
+
+  fn release_name(label: string): bool {
+    not_paused()
+    require_publicly_transferable(label)
+    require(caller == self.name_owner[label], "not owner")
+
+    clear_listing_and_reverse(label, caller)
+    self.name_owner[label]         = ""
+    self.name_destination[label]   = ""
+    self.name_expiry[label]        = 0
+    self.name_registered_at[label] = 0
+    self.name_generation[label] += 1
+    if self.total_names > 0 {
+      self.total_names -= 1
+    }
+
+    emit NameReleased(label, caller)
+    emit RecordUpdated(label, "0")
+    return true
+  }
+
+  fn set_primary(label: string): bool {
+    not_paused()
+    require(caller == self.name_owner[label], "not owner")
+    require(epoch <= self.name_expiry[label], "expired")
+    self.reverse_primary[caller] = label
+    emit PrimarySet(caller, label)
+    return true
+  }
+
+  fn unset_primary(): bool {
+    not_paused()
+    self.reverse_primary[caller] = ""
+    emit PrimaryCleared(caller)
+    return true
+  }
+
+  fn set_sub_record(parent_label: string, sub_label: string, resolver: string): bool {
+    not_paused()
+    require_active_parent_owner(parent_label)
+    require_valid_sub_label(sub_label)
+    assert_address(resolver)
+
+    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] || self.sub_destination[parent_label][sub_label] == "" {
+      self.sub_registered_at[parent_label][sub_label] = epoch
+      self.sub_generation[parent_label][sub_label] = self.name_generation[parent_label]
+      sub_index_add(parent_label, sub_label)
+    }
+
+    self.sub_destination[parent_label][sub_label] = resolver
+    emit SubRecordSet(parent_label, sub_label, resolver)
+    return true
+  }
+
+  fn release_subdomain(parent_label: string, sub_label: string): bool {
+    not_paused()
+    require_active_parent_owner(parent_label)
+    require_valid_sub_label(sub_label)
+    require(self.sub_generation[parent_label][sub_label] == self.name_generation[parent_label], "subdomain not registered")
+    require(self.sub_destination[parent_label][sub_label] != "", "subdomain not registered")
+
+    self.sub_destination[parent_label][sub_label] = ""
+    self.sub_registered_at[parent_label][sub_label] = 0
+    self.sub_generation[parent_label][sub_label] = 0
+    sub_index_remove(parent_label, sub_label)
+
+    emit SubdomainReleased(parent_label, sub_label)
+    return true
+  }
+
+  // ─── Marketplace ────────────────────────────────────────────────────────
+
+  fn list_name(label: string, price: int): bool {
+    not_paused()
+    require_publicly_transferable(label)
+    require(caller == self.name_owner[label], "not owner")
+    require(price > 0, "price must be > 0")
+    require(epoch <= self.name_expiry[label], "expired")
+
+    self.name_listing_price[label]  = price
+    self.name_listing_seller[label] = caller
+    listing_add(label)
+
+    emit NameListed(label, caller, price)
+    return true
+  }
+
+  fn cancel_listing(label: string): bool {
+    not_paused()
+    require(caller == self.name_owner[label], "not owner")
+    require(self.name_listing_price[label] > 0, "not listed")
+
+    self.name_listing_price[label]  = 0
+    self.name_listing_seller[label] = ""
+    listing_remove(label)
+
+    emit NameUnlisted(label)
+    return true
+  }
+
+  payable fn buy_name(label: string, new_destination: string): bool {
+    not_paused()
+    require_publicly_transferable(label)
+    let price = self.name_listing_price[label]
+    require(price > 0, "not listed")
+    require(value == price, "wrong payment")
+
+    let seller = self.name_listing_seller[label]
+    require(seller != "" && seller != "0", "invalid seller")
+    require(self.name_owner[label] == seller, "seller not owner")
+    require(caller != seller, "cannot buy own name")
+    require(epoch <= self.name_expiry[label], "expired")
+
+    let fee = price * self.fee_bps / 10000
+    let net = price - fee
+    require(net > 0, "fee too high")
+
+    // Destination defaults to buyer's address if empty so a purchased name
+    // always resolves to someone real right after the sale.
+    let dest = new_destination
+    if dest == "" { dest = caller }
+    if dest == "0" { dest = caller }
+    assert_address(dest)
+
+    // State update BEFORE transfer.
+    clear_listing_and_reverse(label, seller)
+    self.name_owner[label]       = caller
+    self.name_destination[label] = dest
+    owner_index_add(caller, label)
+    self.fees_collected += fee
+
+    require(transfer(seller, net), "transfer failed")
+    emit NameBought(label, seller, caller, price, fee)
+    emit RecordUpdated(label, dest)
+    return true
+  }
+
+  // ─── Views — name ───────────────────────────────────────────────────────
+
+  view fn resolve(label: string): address {
+    let exp = self.name_expiry[label]
+    if exp == 0 { return "0" }
+    if epoch > exp { return "0" }
+    let dest = self.name_destination[label]
+    if dest == "" { return "0" }
+    return dest
+  }
+
+  view fn resolve_subdomain(parent_label: string, sub_label: string): address {
+    if !is_valid_label_value(parent_label) { return "0" }
+    if !is_valid_label_value(sub_label) { return "0" }
+
+    let exp = self.name_expiry[parent_label]
+    if exp == 0 { return "0" }
+    if epoch > exp { return "0" }
+    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return "0" }
+
+    let dest = self.sub_destination[parent_label][sub_label]
+    if dest == "" { return "0" }
+    return dest
+  }
+
+  view fn resolve_name(name: string): address {
+    let dot = index_of(name, ".")
+    if dot < 0 { return resolve(name) }
+
+    let total = len(name)
+    if dot <= 0 { return "0" }
+    if dot >= total - 1 { return "0" }
+
+    let sub_label = substr(name, 0, dot)
+    let parent_label = substr(name, dot + 1, total - dot - 1)
+    if index_of(parent_label, ".") >= 0 { return "0" }
+    return resolve_subdomain(parent_label, sub_label)
+  }
+
+  view fn owner_of(label: string): address {
+    return self.name_owner[label]
+  }
+
+  view fn expiry_of(label: string): int {
+    return self.name_expiry[label]
+  }
+
+  view fn registered_at(label: string): int {
+    return self.name_registered_at[label]
+  }
+
+  view fn destination_of(label: string): string {
+    return self.name_destination[label]
+  }
+
+  view fn subdomain_destination_of(parent_label: string, sub_label: string): string {
+    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return "" }
+    return self.sub_destination[parent_label][sub_label]
+  }
+
+  view fn subdomain_registered_at(parent_label: string, sub_label: string): int {
+    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return 0 }
+    return self.sub_registered_at[parent_label][sub_label]
+  }
+
+  view fn subdomain_total(parent_label: string): int {
+    if self.sub_count_generation[parent_label] != self.name_generation[parent_label] { return 0 }
+    return self.sub_count[parent_label]
+  }
+
+  view fn subdomain_key_at(parent_label: string, idx: int): string {
+    if self.sub_count_generation[parent_label] != self.name_generation[parent_label] { return "" }
+    require(idx >= 0, "idx < 0")
+    require(idx < self.sub_count[parent_label], "idx out of range")
+    let sub_label = self.sub_keys[parent_label][idx]
+    if sub_label == "" { return "" }
+    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return "" }
+    if self.sub_destination[parent_label][sub_label] == "" { return "" }
+    if epoch > self.name_expiry[parent_label] { return "" }
+    return sub_label
+  }
+
+  view fn is_subdomain_active(parent_label: string, sub_label: string): bool {
+    let resolved = resolve_subdomain(parent_label, sub_label)
+    return resolved != "0"
+  }
+
+  view fn is_available(label: string): bool {
+    if !is_valid_label_value(label) { return false }
+    if is_reserved_name(label) { return false }
+    return is_name_free(label)
+  }
+
+  view fn is_valid_label(label: string): bool {
+    return is_valid_label_value(label)
+  }
+
+  view fn is_valid_sub_label(sub_label: string): bool {
+    return is_valid_sub_label_value(sub_label)
+  }
+
+  view fn is_reserved(label: string): bool {
+    return is_reserved_name(label)
+  }
+
+  view fn is_active(label: string): bool {
+    let exp = self.name_expiry[label]
+    if exp == 0 { return false }
+    return epoch <= exp
+  }
+
+  view fn is_grace(label: string): bool {
+    let exp = self.name_expiry[label]
+    if exp == 0 { return false }
+    if epoch <= exp { return false }
+    return epoch <= exp + self.grace_epochs
+  }
+
+  view fn primary_of(holder: address): string {
+    let label = self.reverse_primary[holder]
+    if label == "" { return "" }
+    if self.name_owner[label] != holder { return "" }
+    if epoch > self.name_expiry[label] { return "" }
+    return label
+  }
+
+  view fn listing_price_of(label: string): int {
+    return self.name_listing_price[label]
+  }
+
+  view fn listing_seller_of(label: string): address {
+    return self.name_listing_seller[label]
+  }
+
+  // ─── Views — meta ───────────────────────────────────────────────────────
+
+  view fn get_owner(): address           { return self.owner }
+  view fn get_pending_owner(): address   { return self.pending_owner }
+  view fn is_paused(): bool              { return self.paused }
+  view fn get_price_per_year(): int      { return self.price_per_year }
+  view fn get_fee_bps(): int             { return self.fee_bps }
+  view fn get_grace_epochs(): int        { return self.grace_epochs }
+  view fn get_fees_collected(): int      { return self.fees_collected }
+  view fn get_total_names(): int         { return self.total_names }
+  view fn get_epoch(): int               { return epoch }
+
+  // ─── Listing enumeration ────────────────────────────────────────────────
+
+  view fn listing_total(): int {
+    return self.listing_count
+  }
+
+  view fn listing_key_at(slot: int): string {
+    if slot < 0 { return "" }
+    if slot >= self.listing_count { return "" }
+    return self.listing_keys[slot]
+  }
+
+  // ─── Per-owner enumeration ──────────────────────────────────────────────
+
+  view fn owner_total(holder: address): int {
+    return self.owner_count[holder]
+  }
+
+  view fn owner_key_at(holder: address, slot: int): string {
+    if slot < 0 { return "" }
+    if slot >= self.owner_count[holder] { return "" }
+    return self.owner_keys[holder][slot]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "octra-id-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev:web3:devnet",
+    "dev:web3:devnet": "vite --mode web3-devnet",
+    "dev:web3:mainnet": "vite --mode web3-mainnet",
+    "dev:circle:devnet": "vite --mode circle-devnet",
+    "dev:circle:mainnet": "vite --mode circle-mainnet",
+    "build": "npm run build:web3:mainnet",
+    "build:devnet": "npm run build:web3:devnet",
+    "build:mainnet": "npm run build:web3:mainnet",
+    "build:web3:devnet": "tsc -b && vite build --mode web3-devnet",
+    "build:web3:mainnet": "tsc -b && vite build --mode web3-mainnet",
+    "build:circle:devnet": "tsc -b && vite build --mode circle-devnet",
+    "build:circle:mainnet": "tsc -b && vite build --mode circle-mainnet",
+    "preview": "vite preview",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@octwa/sdk": "^2.3.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.6.2",
+    "vite": "^6.0.3"
+  }
+}

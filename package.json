@@ -1,0 +1,27 @@
+{
+  "name": "octra-id-ons",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Octra.id name service contract, deployment, verification, and tests.",
+  "main": "scripts/compile.js",
+  "scripts": {
+    "compile": "node scripts/compile.js",
+    "deploy": "node scripts/deploy.js",
+    "save-abi": "node scripts/save_abi.js",
+    "verify": "node scripts/verify.js",
+    "test": "node scripts/test.js",
+    "static-verify": "node scripts/static_verify.js",
+    "compile:devnet": "node scripts/compile.js",
+    "deploy:devnet": "node scripts/deploy.js",
+    "save-abi:devnet": "node scripts/save_abi.js",
+    "verify:devnet": "node scripts/verify.js",
+    "test:devnet": "node scripts/test.js",
+    "static-verify:devnet": "node scripts/static_verify.js"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        let theme = 'dark'
+        try {
+          const saved = window.localStorage.getItem('octra-id-theme')
+          if (saved === 'light' || saved === 'dark') theme = saved
+        } catch {
+          theme = 'dark'
+        }
+        document.documentElement.dataset.theme = theme
+        document.documentElement.style.colorScheme = theme
+      })()
+    </script>
+    <title>Octra identity</title>
+    <meta name="description" content="Octra identity registry and marketplace." />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
