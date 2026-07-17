@@ -7,7 +7,7 @@
 //   ╚██████╔╝██║ ╚████║███████║
 //    ╚═════╝ ╚═╝  ╚═══╝╚══════╝
 //
-//   octra name service  ·  by https://octra.id
+//   octra name service  ·  by 3s
 //
 // ─────────────────────────────────────────────────────────────────────────
 //
@@ -21,7 +21,13 @@
 //   - Built-in marketplace (list / cancel / buy) with fee split and an
 //     on-chain enumeration index.
 //   - Per-owner enumeration so any dApp can list "names owned by addr" in a
-//     single view call — no receipt scanning.
+//     bounded number of view calls — no receipt scanning.
+//   - Read-heavy clients use versioned snapshot pages instead of issuing one
+//     contract call per field. Snapshot schema v1 uses `|` between fields and
+//     `#` between rows; neither character is valid in labels or addresses.
+//   - Snapshot pages are capped at 25 rows. Subsequent pages carry the version
+//     returned by page zero so swap-and-pop mutations cannot silently produce
+//     duplicate or missing rows during a read.
 //
 // Reserved AML parameter names avoided: cipher / pubkey / caller / origin /
 // value / self / self_addr.
@@ -44,6 +50,14 @@ contract OctraNameService {
 
     // Stats
     total_names:     int
+
+    // Read-model versions. These counters let clients keep a local snapshot
+    // and perform one cheap version check before downloading pages again.
+    config_version:     int
+    registry_version:   int
+    listing_version:    int
+    owner_version:      map[address]int
+    subdomain_version:  map[string]int
 
     // Registry — key is the lowercase label
     name_owner:         map[string]address
@@ -126,6 +140,9 @@ contract OctraNameService {
     self.fees_collected = 0
     self.total_names    = 0
     self.listing_count  = 0
+    self.config_version = 1
+    self.registry_version = 0
+    self.listing_version = 0
     seed_reserved_name("root")
     self.reverse_primary[self.owner] = "root"
     emit PrimarySet(self.owner, "root")
@@ -145,6 +162,57 @@ contract OctraNameService {
 
   private fn not_paused() {
     require(!self.paused, "paused")
+  }
+
+  private fn touch_config() {
+    self.config_version += 1
+  }
+
+  private fn touch_registry() {
+    self.registry_version += 1
+  }
+
+  private fn touch_owner(holder: address) {
+    self.owner_version[holder] += 1
+  }
+
+  private fn touch_subdomains(parent_label: string) {
+    self.subdomain_version[parent_label] += 1
+  }
+
+  private fn clamp_page_limit(requested: int): int {
+    let limit = requested
+    if limit < 1 { limit = 1 }
+    if limit > 25 { limit = 25 }
+    return limit
+  }
+
+  private fn append_field(payload: string, field: string): string {
+    return concat(concat(payload, "|"), field)
+  }
+
+  private fn append_int_field(payload: string, field: int): string {
+    return append_field(payload, to_string(field))
+  }
+
+  private fn append_address_field(payload: string, field: address): string {
+    return append_field(payload, to_string(field))
+  }
+
+  private fn append_name_row(payload: string, label: string): string {
+    let out = concat(payload, "#")
+    out = concat(out, label)
+    out = append_address_field(out, self.name_owner[label])
+    out = append_field(out, self.name_destination[label])
+    out = append_int_field(out, self.name_expiry[label])
+    out = append_int_field(out, self.name_registered_at[label])
+    out = append_int_field(out, self.name_generation[label])
+    out = append_int_field(out, self.name_listing_price[label])
+    out = append_address_field(out, self.name_listing_seller[label])
+    let reserved = 0
+    if is_reserved_name(label) { reserved = 1 }
+    out = append_int_field(out, reserved)
+    return out
   }
 
   private fn has_valid_label_chars(label: string): bool {
@@ -324,6 +392,7 @@ contract OctraNameService {
     self.listing_keys[last_idx] = ""
     self.listing_index[label]   = 0
     self.listing_count          = last_idx
+    self.listing_version += 1
   }
 
   // ─── Per-owner enumeration helpers ──────────────────────────────────────
@@ -335,6 +404,7 @@ contract OctraNameService {
     self.owner_keys[holder][slot]   = label
     self.owner_index[holder][label] = slot + 1
     self.owner_count[holder]        = slot + 1
+    touch_owner(holder)
   }
 
   private fn owner_index_remove(holder: address, label: string) {
@@ -352,6 +422,7 @@ contract OctraNameService {
     self.owner_keys[holder][last_idx] = ""
     self.owner_index[holder][label]   = 0
     self.owner_count[holder]          = last_idx
+    touch_owner(holder)
   }
 
   private fn seed_reserved_name(label: string) {
@@ -362,6 +433,7 @@ contract OctraNameService {
     self.name_registered_at[label] = epoch
     self.total_names += 1
     owner_index_add(self.owner, label)
+    touch_registry()
   }
 
   private fn set_name_record(label: string, resolver: string) {
@@ -370,6 +442,8 @@ contract OctraNameService {
     require(epoch <= self.name_expiry[label], "expired")
     assert_address(resolver)
     self.name_destination[label] = resolver
+    touch_registry()
+    touch_owner(caller)
     emit RecordUpdated(label, resolver)
   }
 
@@ -382,6 +456,7 @@ contract OctraNameService {
       self.name_destination[label] = new_admin
       emit RecordUpdated(label, new_admin)
     }
+    touch_registry()
     emit NameTransferred(label, old_admin, new_admin)
   }
 
@@ -390,6 +465,7 @@ contract OctraNameService {
   fn pause(): bool {
     only_admin()
     self.paused = true
+    touch_config()
     emit Paused(caller)
     return true
   }
@@ -397,6 +473,7 @@ contract OctraNameService {
   fn unpause(): bool {
     only_admin()
     self.paused = false
+    touch_config()
     emit Unpaused(caller)
     return true
   }
@@ -405,6 +482,7 @@ contract OctraNameService {
     only_admin()
     require(new_price > 0, "price must be > 0")
     self.price_per_year = new_price
+    touch_config()
     emit PriceUpdated(new_price)
     return true
   }
@@ -413,6 +491,7 @@ contract OctraNameService {
     only_admin()
     require(new_bps >= 0 && new_bps <= 1000, "bps out of range")
     self.fee_bps = new_bps
+    touch_config()
     emit FeeUpdated(new_bps)
     return true
   }
@@ -421,6 +500,8 @@ contract OctraNameService {
     only_admin()
     require(new_grace >= 0, "grace must be >= 0")
     self.grace_epochs = new_grace
+    touch_config()
+    touch_registry()
     emit GracePeriodUpdated(new_grace)
     return true
   }
@@ -432,6 +513,7 @@ contract OctraNameService {
     require(amount > 0, "no fees")
     self.fees_collected = 0
     require(transfer(to, amount), "transfer failed")
+    touch_config()
     emit FeesWithdrawn(to, amount)
     return true
   }
@@ -440,6 +522,7 @@ contract OctraNameService {
     only_admin()
     assert_address(next_owner)
     self.pending_owner = next_owner
+    touch_config()
     emit OwnershipProposed(self.owner, next_owner)
     return true
   }
@@ -458,8 +541,10 @@ contract OctraNameService {
     migrate_reserved_admin_name("poctra", old, self.owner)
     if !has_active_primary(self.owner) && self.name_owner["root"] == self.owner {
       self.reverse_primary[self.owner] = "root"
+      touch_owner(self.owner)
       emit PrimarySet(self.owner, "root")
     }
+    touch_config()
     emit OwnershipAccepted(old, self.owner)
     return true
   }
@@ -477,6 +562,7 @@ contract OctraNameService {
     let cost = self.price_per_year * years
     require(value == cost, "wrong payment")
     self.fees_collected += cost
+    touch_config()
 
     // Clean up prior expired registration (index + reverse primary).
     let prev = self.name_owner[label]
@@ -498,6 +584,8 @@ contract OctraNameService {
       self.reverse_primary[caller] = label
       emit PrimarySet(caller, label)
     }
+    touch_registry()
+    touch_subdomains(label)
 
     emit NameRegistered(label, caller, years, new_expiry)
     emit RecordUpdated(label, destination_val)
@@ -517,11 +605,14 @@ contract OctraNameService {
     let cost = self.price_per_year * years
     require(value == cost, "wrong payment")
     self.fees_collected += cost
+    touch_config()
 
     let base_exp = cur_expiry
     if epoch > cur_expiry { base_exp = epoch }
     let new_expiry = base_exp + (years * 3153600)
     self.name_expiry[label] = new_expiry
+    touch_registry()
+    touch_owner(caller)
 
     emit NameRenewed(label, new_expiry, years)
     return true
@@ -544,6 +635,7 @@ contract OctraNameService {
     clear_listing_and_reverse(label, caller)
     self.name_owner[label] = new_owner
     owner_index_add(new_owner, label)
+    touch_registry()
 
     emit NameTransferred(label, caller, new_owner)
     return true
@@ -572,6 +664,8 @@ contract OctraNameService {
 
     self.name_destination[label] = dest
     self.name_expiry[label] = reserved_expiry_epoch()
+    if prev_owner == new_owner { touch_owner(new_owner) }
+    touch_registry()
     emit RecordUpdated(label, dest)
     return true
   }
@@ -590,6 +684,9 @@ contract OctraNameService {
     if self.total_names > 0 {
       self.total_names -= 1
     }
+    touch_config()
+    touch_registry()
+    touch_subdomains(label)
 
     emit NameReleased(label, caller)
     emit RecordUpdated(label, "0")
@@ -601,6 +698,7 @@ contract OctraNameService {
     require(caller == self.name_owner[label], "not owner")
     require(epoch <= self.name_expiry[label], "expired")
     self.reverse_primary[caller] = label
+    touch_owner(caller)
     emit PrimarySet(caller, label)
     return true
   }
@@ -608,6 +706,7 @@ contract OctraNameService {
   fn unset_primary(): bool {
     not_paused()
     self.reverse_primary[caller] = ""
+    touch_owner(caller)
     emit PrimaryCleared(caller)
     return true
   }
@@ -625,6 +724,7 @@ contract OctraNameService {
     }
 
     self.sub_destination[parent_label][sub_label] = resolver
+    touch_subdomains(parent_label)
     emit SubRecordSet(parent_label, sub_label, resolver)
     return true
   }
@@ -640,6 +740,7 @@ contract OctraNameService {
     self.sub_registered_at[parent_label][sub_label] = 0
     self.sub_generation[parent_label][sub_label] = 0
     sub_index_remove(parent_label, sub_label)
+    touch_subdomains(parent_label)
 
     emit SubdomainReleased(parent_label, sub_label)
     return true
@@ -657,6 +758,9 @@ contract OctraNameService {
     self.name_listing_price[label]  = price
     self.name_listing_seller[label] = caller
     listing_add(label)
+    self.listing_version += 1
+    touch_registry()
+    touch_owner(caller)
 
     emit NameListed(label, caller, price)
     return true
@@ -670,6 +774,8 @@ contract OctraNameService {
     self.name_listing_price[label]  = 0
     self.name_listing_seller[label] = ""
     listing_remove(label)
+    touch_registry()
+    touch_owner(caller)
 
     emit NameUnlisted(label)
     return true
@@ -705,6 +811,8 @@ contract OctraNameService {
     self.name_destination[label] = dest
     owner_index_add(caller, label)
     self.fees_collected += fee
+    touch_registry()
+    touch_config()
 
     require(transfer(seller, net), "transfer failed")
     emit NameBought(label, seller, caller, price, fee)
@@ -765,6 +873,18 @@ contract OctraNameService {
 
   view fn destination_of(label: string): string {
     return self.name_destination[label]
+  }
+
+  // One exact-name lookup replaces the legacy fan-out across owner,
+  // destination, expiry, registration, listing, and reserved views.
+  // Header: v1|registry_version|epoch|grace_epochs
+  // Row:    label|owner|destination|expiry|registered|generation|price|seller|reserved
+  view fn get_name_snapshot(label: string): string {
+    let out = "v1"
+    out = append_int_field(out, self.registry_version)
+    out = append_int_field(out, epoch)
+    out = append_int_field(out, self.grace_epochs)
+    return append_name_row(out, label)
   }
 
   view fn subdomain_destination_of(parent_label: string, sub_label: string): string {
@@ -858,6 +978,27 @@ contract OctraNameService {
   view fn get_total_names(): int         { return self.total_names }
   view fn get_epoch(): int               { return epoch }
 
+  // Header: v1|config_version|owner|pending|paused|price|fee_bps|grace|fees|total|epoch
+  view fn get_config_snapshot(): string {
+    let out = "v1"
+    out = append_int_field(out, self.config_version)
+    out = append_address_field(out, self.owner)
+    out = append_address_field(out, self.pending_owner)
+    let paused_value = 0
+    if self.paused { paused_value = 1 }
+    out = append_int_field(out, paused_value)
+    out = append_int_field(out, self.price_per_year)
+    out = append_int_field(out, self.fee_bps)
+    out = append_int_field(out, self.grace_epochs)
+    out = append_int_field(out, self.fees_collected)
+    out = append_int_field(out, self.total_names)
+    out = append_int_field(out, epoch)
+    return out
+  }
+
+  view fn get_listing_version(): int      { return self.listing_version }
+  view fn get_owner_version(holder: address): int { return self.owner_version[holder] }
+
   // ─── Listing enumeration ────────────────────────────────────────────────
 
   view fn listing_total(): int {
@@ -870,6 +1011,38 @@ contract OctraNameService {
     return self.listing_keys[slot]
   }
 
+  // Header: v1|listing_version|next_cursor|total
+  // Row:    label|seller|price
+  view fn get_listing_page(cursor: int, requested: int, expected_version: int): string {
+    let version = self.listing_version
+    if expected_version >= 0 && expected_version != version {
+      return append_int_field("stale", version)
+    }
+
+    let total = self.listing_count
+    let start = cursor
+    if start < 0 { start = 0 }
+    if start > total { start = total }
+    let finish = start + clamp_page_limit(requested)
+    if finish > total { finish = total }
+
+    let out = "v1"
+    out = append_int_field(out, version)
+    out = append_int_field(out, finish)
+    out = append_int_field(out, total)
+
+    let i = start
+    while i < finish {
+      let label = self.listing_keys[i]
+      out = concat(out, "#")
+      out = concat(out, label)
+      out = append_address_field(out, self.name_listing_seller[label])
+      out = append_int_field(out, self.name_listing_price[label])
+      i += 1
+    }
+    return out
+  }
+
   // ─── Per-owner enumeration ──────────────────────────────────────────────
 
   view fn owner_total(holder: address): int {
@@ -880,5 +1053,82 @@ contract OctraNameService {
     if slot < 0 { return "" }
     if slot >= self.owner_count[holder] { return "" }
     return self.owner_keys[holder][slot]
+  }
+
+  // Header: v1|owner_version|next_cursor|total|epoch|grace_epochs|primary
+  // Rows use the same schema as get_name_snapshot.
+  view fn get_owner_page(holder: address, cursor: int, requested: int, expected_version: int): string {
+    let version = self.owner_version[holder]
+    if expected_version >= 0 && expected_version != version {
+      return append_int_field("stale", version)
+    }
+
+    let total = self.owner_count[holder]
+    let start = cursor
+    if start < 0 { start = 0 }
+    if start > total { start = total }
+    let finish = start + clamp_page_limit(requested)
+    if finish > total { finish = total }
+
+    let primary = self.reverse_primary[holder]
+    if primary != "" {
+      if self.name_owner[primary] != holder || epoch > self.name_expiry[primary] {
+        primary = ""
+      }
+    }
+
+    let out = "v1"
+    out = append_int_field(out, version)
+    out = append_int_field(out, finish)
+    out = append_int_field(out, total)
+    out = append_int_field(out, epoch)
+    out = append_int_field(out, self.grace_epochs)
+    out = append_field(out, primary)
+
+    let i = start
+    while i < finish {
+      out = append_name_row(out, self.owner_keys[holder][i])
+      i += 1
+    }
+    return out
+  }
+
+  // Header: v1|subdomain_version|next_cursor|total|epoch|parent_expiry|generation
+  // Row:    label|destination|registered_at
+  view fn get_subdomain_page(parent_label: string, cursor: int, requested: int, expected_version: int): string {
+    let version = self.subdomain_version[parent_label]
+    if expected_version >= 0 && expected_version != version {
+      return append_int_field("stale", version)
+    }
+
+    let generation = self.name_generation[parent_label]
+    let total = 0
+    if self.sub_count_generation[parent_label] == generation {
+      total = self.sub_count[parent_label]
+    }
+    let start = cursor
+    if start < 0 { start = 0 }
+    if start > total { start = total }
+    let finish = start + clamp_page_limit(requested)
+    if finish > total { finish = total }
+
+    let out = "v1"
+    out = append_int_field(out, version)
+    out = append_int_field(out, finish)
+    out = append_int_field(out, total)
+    out = append_int_field(out, epoch)
+    out = append_int_field(out, self.name_expiry[parent_label])
+    out = append_int_field(out, generation)
+
+    let i = start
+    while i < finish {
+      let sub_label = self.sub_keys[parent_label][i]
+      out = concat(out, "#")
+      out = concat(out, sub_label)
+      out = append_field(out, self.sub_destination[parent_label][sub_label])
+      out = append_int_field(out, self.sub_registered_at[parent_label][sub_label])
+      i += 1
+    }
+    return out
   }
 }

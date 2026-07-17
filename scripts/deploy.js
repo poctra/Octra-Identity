@@ -18,6 +18,51 @@ function log(label, value) {
   console.log(`${label.padEnd(18)} ${value}`)
 }
 
+function unwrapView(value) {
+  return value && typeof value === 'object' && 'result' in value ? value.result : value
+}
+
+async function readViewWithRetry(address, method, params = []) {
+  let lastError
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      return unwrapView(await rpc('contract_call', [address, method, params]))
+    } catch (err) {
+      lastError = err
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+    }
+  }
+  throw lastError ?? new Error(`unable to read ${method}`)
+}
+
+async function assertConstructorState({ address, abiPath, deployer, constructorParams }) {
+  if (!fs.existsSync(abiPath)) return
+  const raw = JSON.parse(fs.readFileSync(abiPath, 'utf8'))
+  const functions = Array.isArray(raw) ? raw : (raw?.functions ?? [])
+  const names = new Set(functions.map((fn) => typeof fn === 'string' ? fn : fn?.name).filter(Boolean))
+
+  if (names.has('get_owner')) {
+    const owner = String(await readViewWithRetry(address, 'get_owner'))
+    if (!owner || owner === '0') throw new Error('constructor sanity failed: owner is unset')
+    if (owner !== deployer) throw new Error(`constructor sanity failed: owner ${owner} != deployer ${deployer}`)
+    log('owner_check', owner)
+  }
+
+  if (names.has('get_price_per_year') && constructorParams.length > 0) {
+    const price = Number(await readViewWithRetry(address, 'get_price_per_year'))
+    if (price !== Number(constructorParams[0])) {
+      throw new Error(`constructor sanity failed: price ${price} != ${constructorParams[0]}`)
+    }
+    log('price_check', String(price))
+  }
+
+  if (names.has('get_config_snapshot')) {
+    const snapshot = String(await readViewWithRetry(address, 'get_config_snapshot'))
+    if (!snapshot.startsWith('v1|')) throw new Error('constructor sanity failed: invalid config snapshot')
+    log('snapshot_check', 'v1')
+  }
+}
+
 ;(async () => {
   const { config, missing } = buildConfig()
   if (missing.length) {
@@ -97,6 +142,13 @@ function log(label, value) {
     log('effort',  String(receipt.effort ?? '?'))
     log('events',  String((receipt.events ?? []).length))
   }
+
+  await assertConstructorState({
+    address: computedAddress,
+    abiPath: path.join(outDir, 'abi.json'),
+    deployer: config.deployer,
+    constructorParams,
+  })
 
   const deployment = {
     contract:          config.contractName,

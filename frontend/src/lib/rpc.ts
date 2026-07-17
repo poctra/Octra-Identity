@@ -283,7 +283,18 @@ export async function contractView<T = unknown>(
 async function programView<T>(contract: string, method: string, params: unknown[]): Promise<T> {
   const circle = window.OctraCircle
   const contextCircle = circle?.context?.circle_id
-  if (circle?.request && contextCircle && contextCircle === contract) {
+  const targetsActiveCircle = Boolean(contextCircle && contextCircle === contract)
+
+  // A Circle-hosted dApp can still read ordinary AML contracts. Sending those
+  // addresses through a Circle program-view method produces `Not Found` on
+  // gateways that correctly distinguish Circle programs from AML contracts.
+  // Only the active Circle itself is eligible for the program-view transport;
+  // external contracts always use the standard contract_call RPC.
+  if (!targetsActiveCircle) {
+    return unwrapViewResult<T>(await rpc('contract_call', [contract, method, params]))
+  }
+
+  if (circle?.request) {
     try {
       return unwrapViewResult<T>(await circle.request('program.view', { method, params }))
     } catch (err) {

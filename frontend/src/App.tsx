@@ -23,16 +23,16 @@ import {
 } from 'lucide-react'
 
 import { useWallet } from './hooks/useWallet'
-import { EXPLORER_HOST, ONS_CONTRACT } from './lib/constants'
+import { EXPLORER_HOST, NETWORK, ONS_CONTRACT } from './lib/constants'
 import { listAllowedWallets, type DetectedWallet, type WalletInfo } from './wallets'
 import {
   loadActiveListings,
   loadConfig,
   loadName,
-  loadOwnerNames,
+  loadOwnerNamesSnapshot,
   loadSubdomains,
   MANAGED_RESERVED_LABELS,
-  primaryOf,
+  ownerVersionOf,
   sendWrite,
   type ListingEntry,
   type NameRecord,
@@ -63,6 +63,7 @@ type TxModalState = TxProgressEvent & {
 const THEME_KEY = 'octra-id-theme'
 const KNOWN_OWNED_NAMES_KEY = 'octra-id-known-owned-names'
 const OWNER_NAMES_CACHE_KEY = 'octra-id-owner-names-cache'
+const LEGACY_OWNER_CACHE_MS = 30_000
 
 export default function App() {
   const wallet = useWallet()
@@ -109,13 +110,12 @@ export default function App() {
   }, [overlayOpen])
 
   const refresh = useCallback(async ({ forceOwned = false }: { forceOwned?: boolean } = {}) => {
-    if (address && tab === 'names' && !forceOwned) {
-      const cachedNames = readOwnerNamesCache(address)
-      if (cachedNames) {
-        setOwned(cachedNames.entries)
-        setPrimary(cachedNames.primary)
-        if (configRef.current) return
-      }
+    const cachedNames = address && tab === 'names' && !forceOwned
+      ? readOwnerNamesCache(address)
+      : null
+    if (cachedNames) {
+      setOwned(cachedNames.entries)
+      setPrimary(cachedNames.primary)
     }
 
     const nextConfig = await loadConfig()
@@ -125,20 +125,33 @@ export default function App() {
       setListings(await loadActiveListings())
     }
     if (address && tab === 'names') {
-      const cachedNames = forceOwned ? null : readOwnerNamesCache(address)
       if (cachedNames) {
-        setOwned(cachedNames.entries)
-        setPrimary(cachedNames.primary)
-        return
+        const revalidated = revalidateOwnerEntries(cachedNames.entries, nextConfig)
+        let cacheCurrent = cachedNames.version == null
+          ? Date.now() - cachedNames.savedAt < LEGACY_OWNER_CACHE_MS
+          : false
+        if (cachedNames.version != null) {
+          try {
+            cacheCurrent = await ownerVersionOf(address) === cachedNames.version
+          } catch {
+            // Preserve the immediately rendered stale snapshot during a transient RPC failure.
+            cacheCurrent = true
+          }
+        }
+        if (cacheCurrent) {
+          const currentPrimary = revalidated.some((entry) => entry.label === cachedNames.primary && entry.record.isActive)
+            ? cachedNames.primary
+            : ''
+          setOwned(revalidated)
+          setPrimary(currentPrimary)
+          return
+        }
       }
-      const [indexedNames, primaryName] = await Promise.all([
-        loadOwnerNames(address, nextConfig),
-        primaryOf(address),
-      ])
-      const names = await supplementOwnerNames(address, indexedNames, nextConfig, sameAddr(nextConfig.admin, address))
+      const snapshot = await loadOwnerNamesSnapshot(address, nextConfig)
+      const names = await supplementOwnerNames(address, snapshot.entries, nextConfig, sameAddr(nextConfig.admin, address))
       setOwned(names)
-      setPrimary(primaryName)
-      writeOwnerNamesCache(address, names, primaryName)
+      setPrimary(snapshot.primary)
+      writeOwnerNamesCache(address, names, snapshot.primary, snapshot.version)
     } else if (!address) {
       setOwned([])
       setPrimary('')
@@ -155,7 +168,7 @@ export default function App() {
       })
     const timer = window.setInterval(() => {
       void refresh().catch(() => {})
-    }, 16000)
+    }, 30000)
     return () => {
       cancelled = true
       window.clearInterval(timer)
@@ -1469,12 +1482,34 @@ function mergeOwnerEntries(entries: OwnerEntry[]): OwnerEntry[] {
   return [...byLabel.values()].sort((a, b) => a.label.localeCompare(b.label))
 }
 
+function revalidateOwnerEntries(
+  entries: OwnerEntry[],
+  meta: Pick<OnsConfig, 'currentEpoch' | 'graceEpochs'>,
+): OwnerEntry[] {
+  return entries.map((entry) => {
+    const expiry = entry.record.expiry
+    const isActive = expiry > 0 && meta.currentEpoch <= expiry
+    const isGrace = expiry > 0 && meta.currentEpoch > expiry && meta.currentEpoch <= expiry + meta.graceEpochs
+    return {
+      ...entry,
+      record: {
+        ...entry.record,
+        isActive,
+        isGrace,
+        isAvailable: entry.record.isValidLabel && !entry.record.isReserved && (
+          expiry === 0 || meta.currentEpoch > expiry + meta.graceEpochs
+        ),
+      },
+    }
+  })
+}
+
 function knownOwnedStorageKey(address: string): string {
   return `${KNOWN_OWNED_NAMES_KEY}:${address.toLowerCase()}`
 }
 
 function ownerNamesStorageKey(address: string): string {
-  return `${OWNER_NAMES_CACHE_KEY}:${ONS_CONTRACT.toLowerCase()}:${address.toLowerCase()}`
+  return `${OWNER_NAMES_CACHE_KEY}:${NETWORK}:${ONS_CONTRACT.toLowerCase()}:${address.toLowerCase()}`
 }
 
 function readKnownOwnedLabels(address: string): string[] {
@@ -1504,27 +1539,45 @@ function pruneKnownOwnedLabels(address: string, labels: string[]) {
   writeKnownOwnedLabels(address, labels)
 }
 
-function readOwnerNamesCache(address: string): { entries: OwnerEntry[]; primary: string } | null {
+function readOwnerNamesCache(address: string): {
+  entries: OwnerEntry[]
+  primary: string
+  version: number | null
+  savedAt: number
+} | null {
   if (!address || typeof window === 'undefined') return null
   try {
     const raw = window.localStorage.getItem(ownerNamesStorageKey(address))
     if (!raw) return null
-    const parsed = JSON.parse(raw) as { entries?: unknown[]; primary?: string }
+    const parsed = JSON.parse(raw) as {
+      entries?: unknown[]
+      primary?: string
+      version?: unknown
+      savedAt?: unknown
+    }
     if (!Array.isArray(parsed.entries)) return null
     return {
       entries: mergeOwnerEntries(parsed.entries.map(hydrateOwnerEntry).filter(Boolean) as OwnerEntry[]),
       primary: typeof parsed.primary === 'string' ? parsed.primary : '',
+      version: typeof parsed.version === 'number' && Number.isSafeInteger(parsed.version) ? parsed.version : null,
+      savedAt: typeof parsed.savedAt === 'number' && Number.isFinite(parsed.savedAt) ? parsed.savedAt : 0,
     }
   } catch {
     return null
   }
 }
 
-function writeOwnerNamesCache(address: string, entries: OwnerEntry[], primary: string) {
+function writeOwnerNamesCache(
+  address: string,
+  entries: OwnerEntry[],
+  primary: string,
+  version: number | null,
+) {
   if (!address || typeof window === 'undefined') return
   try {
     window.localStorage.setItem(ownerNamesStorageKey(address), JSON.stringify({
       savedAt: Date.now(),
+      version,
       primary,
       entries: entries.map(serializeOwnerEntry),
     }))

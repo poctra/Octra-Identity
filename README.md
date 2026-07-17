@@ -15,6 +15,33 @@ Octra Identity is an on-chain naming protocol and consumer dApp for human-readab
 - Build separate Web3 and Circle frontend variants.
 - Compile, statically verify, deploy, publish ABI metadata, and verify AML source.
 
+## Read Performance
+
+Octra Identity keeps enumerable owner, marketplace, and subdomain indexes in
+contract state. Read-heavy clients consume those indexes through versioned
+snapshot views:
+
+- `get_name_snapshot` returns every field required for an exact-name result in
+  one view.
+- `get_owner_page`, `get_listing_page`, and `get_subdomain_page` return up to
+  25 records per call.
+- `get_config_snapshot` replaces the individual configuration view fan-out.
+- Per-owner, listing, registry, config, and subdomain versions let clients
+  validate a local cache without downloading unchanged records again.
+
+Snapshot page zero establishes the version and total. Later pages provide that
+version as a guard; the contract returns a stale marker if a concurrent
+swap-and-pop mutation invalidates the cursor. Clients then restart from page
+zero. This keeps reads bounded and prevents duplicate or skipped records.
+`VITE_ONS_PAGE_SIZE` may lower the client page size from the default 25 when a
+constrained gateway benefits from smaller responses; the contract always
+enforces the 25-row maximum.
+
+The frontend renders a cached My Names snapshot immediately, validates it
+against the owner version, and only downloads pages after a relevant on-chain
+change. Frontend builds retain legacy view fallbacks so they can remain usable
+during a staged contract rollout.
+
 ## Repository Structure
 
 ```text

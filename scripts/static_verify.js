@@ -217,6 +217,49 @@ const checks = [
         .every((name) => source.includes(`migrate_reserved_admin_name("${name}", old, self.owner)`)),
     detail: 'admin acceptance atomically migrates reserved names still owned by the previous admin',
   },
+  {
+    code: 'VERSIONED_SNAPSHOT_STATE',
+    ok: /config_version:\s+int/.test(source) &&
+      /registry_version:\s+int/.test(source) &&
+      /listing_version:\s+int/.test(source) &&
+      /owner_version:\s+map\[address\]int/.test(source) &&
+      /subdomain_version:\s+map\[string\]int/.test(source),
+    detail: 'read models expose independent versions for config, registry, listings, owners, and subdomains',
+  },
+  {
+    code: 'BOUNDED_SNAPSHOT_PAGES',
+    ok: /private\s+fn\s+clamp_page_limit/.test(source) &&
+      /if\s+limit\s*>\s*25\s*\{\s*limit\s*=\s*25\s*\}/.test(source) &&
+      ['get_owner_page', 'get_listing_page', 'get_subdomain_page']
+        .every((method) => source.includes(`view fn ${method}`)),
+    detail: 'enumeration snapshots are cursor-paged and capped at 25 rows per view',
+  },
+  {
+    code: 'SNAPSHOT_VERSION_GUARDS',
+    ok: (source.match(/expected_version\s*>=\s*0\s*&&\s*expected_version\s*!=\s*version/g) ?? []).length === 3 &&
+      (source.match(/return\s+append_int_field\s*\(\s*"stale"\s*,\s*version\s*\)/g) ?? []).length === 3,
+    detail: 'later pages reject stale cursors after swap-and-pop mutations',
+  },
+  {
+    code: 'COMPOSITE_READ_VIEWS',
+    ok: /view\s+fn\s+get_name_snapshot/.test(source) &&
+      /view\s+fn\s+get_config_snapshot/.test(source) &&
+      /private\s+fn\s+append_name_row/.test(source) &&
+      /concat\s*\(\s*payload\s*,\s*"#"\s*\)/.test(source) &&
+      /concat\s*\(\s*concat\s*\(\s*payload\s*,\s*"\|"\s*\)\s*,\s*field\s*\)/.test(source),
+    detail: 'exact-name, configuration, and paged enumeration data use snapshot schema v1',
+  },
+  {
+    code: 'SNAPSHOT_MUTATION_TRACKING',
+    ok: /private\s+fn\s+touch_owner/.test(source) &&
+      /private\s+fn\s+touch_registry/.test(source) &&
+      /private\s+fn\s+touch_subdomains/.test(source) &&
+      (source.match(/touch_owner\s*\(/g) ?? []).length >= 9 &&
+      (source.match(/touch_registry\s*\(/g) ?? []).length >= 10 &&
+      (source.match(/touch_subdomains\s*\(/g) ?? []).length >= 4 &&
+      (source.match(/self\.listing_version\s*\+=\s*1/g) ?? []).length >= 2,
+    detail: 'writes invalidate only the read models whose materialized data changed',
+  },
 ]
 
 const failed = checks.filter((check) => !check.ok)
