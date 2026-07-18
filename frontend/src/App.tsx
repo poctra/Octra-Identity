@@ -250,6 +250,14 @@ export default function App() {
         },
       })
       if (!result.success) throw new Error(result.revertReason ?? 'contract call reverted')
+      if (result.confirmationPending) {
+        setNotice({
+          kind: 'info',
+          text: 'Transaction submitted. Final confirmation is still pending.',
+          tx: result.txHash,
+        })
+        return
+      }
       setNotice({ kind: 'ok', text: `${method} confirmed`, tx: result.txHash })
       if (label && (method === 'register_name' || method === 'buy_name')) {
         rememberKnownOwnedLabel(address, label)

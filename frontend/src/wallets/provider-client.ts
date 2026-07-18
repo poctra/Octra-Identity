@@ -34,6 +34,52 @@ export interface OctraTransactionResult {
   explorerUrl?: string
 }
 
+const OCTRA_TX_HASH = /^(?:0x)?[0-9a-f]{64}$/i
+
+function transactionResultRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (OCTRA_TX_HASH.test(trimmed)) return { hash: trimmed }
+    if (trimmed.startsWith('{')) {
+      try {
+        return transactionResultRecord(JSON.parse(trimmed))
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+
+  const record = value as Record<string, unknown>
+  if (record.hash || record.txHash || record.tx_hash) return record
+  return transactionResultRecord(record.result) ?? transactionResultRecord(record.data)
+}
+
+function normalizeTransactionResult(value: unknown): OctraTransactionResult {
+  const record = transactionResultRecord(value)
+  const rawHash = String(record?.hash ?? record?.txHash ?? record?.tx_hash ?? '').trim()
+  if (!OCTRA_TX_HASH.test(rawHash)) {
+    throw new Error('Wallet returned an invalid transaction hash after broadcast.')
+  }
+
+  const hash = rawHash.replace(/^0x/i, '').toLowerCase()
+  const rawStatus = String(record?.status ?? 'pending').toLowerCase()
+  const status: OctraTransactionResult['status'] =
+    rawStatus === 'confirmed' || rawStatus === 'rejected' || rawStatus === 'dropped'
+      ? rawStatus
+      : 'pending'
+
+  return {
+    hash,
+    accepted: record?.accepted !== false,
+    status,
+    nonce: typeof record?.nonce === 'number' ? record.nonce : undefined,
+    ouCost: record?.ouCost != null ? String(record.ouCost) : undefined,
+    explorerUrl: typeof record?.explorerUrl === 'string' ? record.explorerUrl : undefined,
+  }
+}
+
 export interface SendContractTxParams {
   address: string
   method:  string
@@ -92,7 +138,8 @@ export class ProviderClient {
   // ── Writes (popup) ───────────────────────────────────────────────────
 
   async sendContractTransaction(params: SendContractTxParams): Promise<OctraTransactionResult> {
-    return this.request<OctraTransactionResult>('octra_sendContractTransaction', [params])
+    const result = await this.request<unknown>('octra_sendContractTransaction', [params])
+    return normalizeTransactionResult(result)
   }
 
   // ── Events ───────────────────────────────────────────────────────────

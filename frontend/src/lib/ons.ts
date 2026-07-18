@@ -6,6 +6,7 @@ import {
   clearContractViewCache,
   getContractReceipt,
   getTransaction,
+  isTransactionLookupPendingError,
   mapWithConcurrency,
   viewInt,
   viewString,
@@ -404,6 +405,7 @@ export interface SendOptions {
 export interface SendResult {
   txHash: string
   success: boolean
+  confirmationPending?: boolean
   revertReason?: string
   epoch?: number
 }
@@ -437,7 +439,14 @@ export async function sendWrite(
     onProgress?.({ stage: 'rejected', message: (err as Error).message || 'Transaction rejected.' })
     throw err
   }
-  onProgress?.({ stage: 'accepted', txHash: result.hash, message: 'Network accepted the transaction.' })
+  if (!result.accepted || result.status === 'rejected' || result.status === 'dropped') {
+    const message = result.status === 'dropped'
+      ? 'Wallet reported that the transaction was dropped.'
+      : 'Wallet reported that the transaction was rejected.'
+    onProgress?.({ stage: 'rejected', txHash: result.hash, message })
+    throw new Error(message)
+  }
+  onProgress?.({ stage: 'accepted', txHash: result.hash, message: 'Broadcast accepted. Waiting for final confirmation.' })
   const receipt = await waitForReceipt(result.hash, { onProgress })
   clearOnsSnapshotCache()
   return receipt
@@ -453,6 +462,8 @@ async function waitForReceipt(
 ): Promise<SendResult> {
   const start = Date.now()
   let lastTx: TxInfo | null = null
+  let chainConfirmed = false
+  let lookupDelayNotified = false
 
   while (Date.now() - start < timeoutMs) {
     try {
@@ -468,9 +479,23 @@ async function waitForReceipt(
           epoch: lastTx.epoch ?? lastTx.epoch_id,
         }
       }
-      if (lastTx.status === 'confirmed' || lastTx.epoch || lastTx.epoch_id) break
+      if (lastTx.status === 'confirmed' || lastTx.epoch || lastTx.epoch_id) {
+        chainConfirmed = true
+        break
+      }
     } catch (err) {
-      if (!/not found/i.test((err as Error).message) && Date.now() - start > 10000) throw err
+      if (isTransactionLookupPendingError(err)) {
+        if (!lookupDelayNotified) {
+          lookupDelayNotified = true
+          onProgress?.({
+            stage: 'accepted',
+            txHash,
+            message: 'Broadcast accepted. Waiting for the node index and final confirmation.',
+          })
+        }
+      } else if (Date.now() - start > 10000) {
+        throw err
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
@@ -494,8 +519,17 @@ async function waitForReceipt(
     await new Promise((resolve) => setTimeout(resolve, 1500))
   }
 
-  onProgress?.({ stage: 'confirmed', txHash, message: 'Confirmed on-chain.' })
-  return { txHash, success: true, epoch: lastTx?.epoch ?? lastTx?.epoch_id }
+  if (chainConfirmed) {
+    onProgress?.({ stage: 'confirmed', txHash, message: 'Confirmed on-chain.' })
+    return { txHash, success: true, epoch: lastTx?.epoch ?? lastTx?.epoch_id }
+  }
+
+  onProgress?.({
+    stage: 'accepted',
+    txHash,
+    message: 'Transaction remains accepted. Final confirmation is taking longer than expected.',
+  })
+  return { txHash, success: true, confirmationPending: true }
 }
 
 function extractRejectReason(err: TxInfo['error']): string {

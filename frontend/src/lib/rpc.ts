@@ -393,6 +393,16 @@ export async function getTransaction(hash: string): Promise<TxInfo> {
   return rpc<TxInfo>('octra_transaction', [hash])
 }
 
+export function isTransactionLookupPendingError(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err
+    ? Number((err as { code?: unknown }).code)
+    : NaN
+  if (code === 112 || code === 404) return true
+
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  return /\bnot[\s_-]*found\b|\b(?:rpc\s+)?http\s*404\b|\b404\s+not[\s_-]*found\b|transaction\s+(?:is\s+)?missing/i.test(message)
+}
+
 export interface ContractReceipt {
   contract: string
   method:   string
@@ -408,7 +418,7 @@ export async function getContractReceipt(hash: string): Promise<ContractReceipt 
   try {
     return await rpc<ContractReceipt>('contract_receipt', [hash])
   } catch (err) {
-    if (/not found/i.test((err as Error).message)) return null
+    if (isTransactionLookupPendingError(err)) return null
     throw err
   }
 }
