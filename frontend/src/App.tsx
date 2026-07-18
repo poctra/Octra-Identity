@@ -484,7 +484,7 @@ function WalletPicker({
         <div className="wallet-options">
           {detected.map((entry) => {
             const icon = entry.info.iconUrl
-            const identity = entry.announce?.rdns ?? entry.provider.providerId ?? 'RFC-O-1 provider'
+            const providerId = entry.provider.providerId ?? entry.info.id
             return (
               <button key={entry.info.id} className="wallet-option" disabled={connecting} onClick={() => onConnect(entry.info.id)}>
                 <span className="wallet-avatar">
@@ -492,7 +492,7 @@ function WalletPicker({
                 </span>
                 <span className="wallet-option-body">
                   <strong>{entry.info.displayName}</strong>
-                  <span>{identity}</span>
+                  <span>ID: {providerId}</span>
                 </span>
               </button>
             )

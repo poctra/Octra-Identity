@@ -33,18 +33,21 @@ function matchOctWa(announce: AnnounceProviderInfo | undefined, provider: OctraP
 
 // ─── 0xio ────────────────────────────────────────────────────────────────
 //
-// 0xio's RFC-O-1 surface landed in extension v2.4.3 / SDK v2.7.1
-// (CHANGELOG, 2026-05-27). Their extension's exact announce envelope is
-// not publicly pinned yet, so we accept several signals:
+// 0xio exposes an RFC-O-1-compatible in-page provider but currently does not
+// announce a provider id or discovery envelope. Its injected provider defines
+// `isFhex` as a read-only vendor marker, so we use that marker only to select
+// display metadata for the provider object that was already discovered.
 //
 //   - provider.providerId is '0xio' or 'zeroxio' (most reliable)
+//   - provider.isFhex is true (current 0xio extension)
 //   - announce.rdns starts with '0xio.' or contains '.0xio'
 // Display names are intentionally not identity signals because any provider
-// can claim one. providerId and rdns are the only registry match inputs.
+// can claim one. These signals improve presentation and are not trust anchors.
 
 function matchZeroXio(announce: AnnounceProviderInfo | undefined, provider: OctraProvider): boolean {
   const pid = lower(provider.providerId)
   if (pid === '0xio' || pid === 'zeroxio') return true
+  if ((provider as OctraProvider & { isFhex?: boolean }).isFhex === true) return true
   if (!announce) return false
   const rdns = lower(announce.rdns)
   if (rdns.startsWith('0xio.') || rdns === 'xyz.0xio' || rdns.includes('.0xio')) return true
@@ -64,6 +67,7 @@ export const WALLET_REGISTRY: WalletEntry[] = [
     info: {
       id:          'octwa',
       displayName: 'OctWa Wallet',
+      iconUrl:     '/wallets/octwa.png',
       homepageUrl: 'https://chromewebstore.google.com/detail/octwa-octra-wallet/celnpgbeekcppnfbhbkcdaajdbibpdai',
     },
     match: matchOctWa,
@@ -71,8 +75,8 @@ export const WALLET_REGISTRY: WalletEntry[] = [
   {
     info: {
       id:          'poctra',
-      displayName: 'Poctra',
-      iconUrl:     '/octra-id.svg',
+      displayName: 'Poctra Wallet',
+      iconUrl:     '/wallets/poctra.svg',
       homepageUrl: 'https://octra.id',
     },
     match: matchPoctra,
@@ -81,7 +85,8 @@ export const WALLET_REGISTRY: WalletEntry[] = [
     info: {
       id:          '0xio',
       displayName: '0xio Wallet',
-      homepageUrl: 'https://0xio.xyz',
+      iconUrl:     '/wallets/0xio.png',
+      homepageUrl: 'https://chromewebstore.google.com/detail/0xio-wallet/anknhjilldkeelailocijnfibefmepcc',
     },
     match: matchZeroXio,
   },
