@@ -24,7 +24,7 @@ import {
 
 import { useWallet } from './hooks/useWallet'
 import { EXPLORER_HOST, NETWORK, ONS_CONTRACT } from './lib/constants'
-import { listAllowedWallets, type DetectedWallet, type WalletInfo } from './wallets'
+import { type DetectedWallet } from './wallets'
 import {
   loadActiveListings,
   loadConfig,
@@ -92,7 +92,6 @@ export default function App() {
   const isAdmin = Boolean(config?.admin && address && sameAddr(config.admin, address))
   const isPendingOwner = Boolean(config?.pendingOwner && config.pendingOwner !== '0' && address && sameAddr(config.pendingOwner, address))
   const canAccessAdmin = isAdmin || isPendingOwner
-  const walletOptions = useMemo(() => listAllowedWallets(), [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -298,10 +297,6 @@ export default function App() {
       void wallet.disconnect()
       return
     }
-    if (wallet.available.length === 1) {
-      void wallet.connectWith(wallet.available[0].info.id)
-      return
-    }
     wallet.rescan()
     setWalletPickerOpen(true)
   }, [address, wallet])
@@ -321,7 +316,6 @@ export default function App() {
 
         {walletPickerOpen && !address && (
           <WalletPicker
-            wallets={walletOptions}
             detected={wallet.available}
             connecting={wallet.connecting}
             error={wallet.error}
@@ -460,7 +454,6 @@ function TopBar({
 }
 
 function WalletPicker({
-  wallets,
   detected,
   connecting,
   error,
@@ -468,7 +461,6 @@ function WalletPicker({
   onRescan,
   onConnect,
 }: {
-  wallets: WalletInfo[]
   detected: DetectedWallet[]
   connecting: boolean
   error: string | null
@@ -490,39 +482,30 @@ function WalletPicker({
         </div>
 
         <div className="wallet-options">
-          {wallets.map((entry) => {
-            const match = detected.find((wallet) => wallet.info.id === entry.id)
-            const icon = match?.info.iconUrl ?? entry.iconUrl
-            const body = (
-              <>
+          {detected.map((entry) => {
+            const icon = entry.info.iconUrl
+            const identity = entry.announce?.rdns ?? entry.provider.providerId ?? 'RFC-O-1 provider'
+            return (
+              <button key={entry.info.id} className="wallet-option" disabled={connecting} onClick={() => onConnect(entry.info.id)}>
                 <span className="wallet-avatar">
-                  {icon ? <img src={icon} alt="" /> : entry.displayName.slice(0, 1)}
+                  {icon ? <img src={icon} alt="" /> : entry.info.displayName.slice(0, 1)}
                 </span>
                 <span className="wallet-option-body">
-                  <strong>{entry.displayName}</strong>
-                  <span>{match ? 'detected' : 'not detected'}</span>
+                  <strong>{entry.info.displayName}</strong>
+                  <span>{identity}</span>
                 </span>
-              </>
-            )
-
-            if (match) {
-              return (
-                <button key={entry.id} className="wallet-option" disabled={connecting} onClick={() => onConnect(entry.id)}>
-                  {body}
-                </button>
-              )
-            }
-
-            return entry.homepageUrl ? (
-              <a key={entry.id} className="wallet-option disabled" href={entry.homepageUrl} target="_blank" rel="noreferrer">
-                {body}
-              </a>
-            ) : (
-              <button key={entry.id} className="wallet-option" disabled>
-                {body}
               </button>
             )
           })}
+          {detected.length === 0 && (
+            <div className="wallet-option disabled">
+              <span className="wallet-avatar"><Wallet /></span>
+              <span className="wallet-option-body">
+                <strong>No wallet detected</strong>
+                <span>Install or enable an RFC-O-1 wallet, then rescan.</span>
+              </span>
+            </div>
+          )}
         </div>
 
         {error && <p className="wallet-error">{error}</p>}

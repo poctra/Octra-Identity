@@ -8,7 +8,6 @@ interface ImportMetaEnv {
   readonly VITE_ONS_CONTRACT?: string
   readonly VITE_ONS_RPC?:      string
   readonly VITE_ONS_EXPLORER?: string
-  readonly VITE_ONS_WALLETS?:  string
   readonly VITE_ONS_VIEW_CONCURRENCY?: string
   readonly VITE_ONS_PAGE_SIZE?: string
   readonly VITE_ONS_VIEW_RPC_CONCURRENCY?: string

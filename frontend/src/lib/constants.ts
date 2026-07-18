@@ -35,13 +35,6 @@ const requireEnv = (key: 'VITE_ONS_CONTRACT'): string => {
 
 export const ONS_CONTRACT = requireEnv('VITE_ONS_CONTRACT')
 
-export const ALLOWED_WALLET_IDS: readonly string[] = (
-  import.meta.env.VITE_ONS_WALLETS ?? 'octwa,poctra'
-)
-  .split(',')
-  .map((s: string) => s.trim().toLowerCase())
-  .filter(Boolean)
-
 export const EPOCHS_PER_DAY = 8640
 export const EPOCHS_PER_YEAR = 3153600
 export const OU_PER_OCT = 1000000n

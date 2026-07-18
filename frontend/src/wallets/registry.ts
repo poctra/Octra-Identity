@@ -28,8 +28,7 @@ function lower(s?: string): string { return (s ?? '').toLowerCase() }
 function matchOctWa(announce: AnnounceProviderInfo | undefined, provider: OctraProvider): boolean {
   if (provider.providerId === 'octwa') return true
   if (!announce) return false
-  if (announce.rdns === 'network.octra.octwa') return true
-  return lower(announce.name) === 'octwa'
+  return lower(announce.rdns) === 'network.octra.octwa'
 }
 
 // ─── 0xio ────────────────────────────────────────────────────────────────
@@ -40,7 +39,8 @@ function matchOctWa(announce: AnnounceProviderInfo | undefined, provider: OctraP
 //
 //   - provider.providerId is '0xio' or 'zeroxio' (most reliable)
 //   - announce.rdns starts with '0xio.' or contains '.0xio'
-//   - announce.name contains '0xio'
+// Display names are intentionally not identity signals because any provider
+// can claim one. providerId and rdns are the only registry match inputs.
 
 function matchZeroXio(announce: AnnounceProviderInfo | undefined, provider: OctraProvider): boolean {
   const pid = lower(provider.providerId)
@@ -48,7 +48,7 @@ function matchZeroXio(announce: AnnounceProviderInfo | undefined, provider: Octr
   if (!announce) return false
   const rdns = lower(announce.rdns)
   if (rdns.startsWith('0xio.') || rdns === 'xyz.0xio' || rdns.includes('.0xio')) return true
-  return lower(announce.name).includes('0xio')
+  return false
 }
 
 function matchPoctra(announce: AnnounceProviderInfo | undefined, provider: OctraProvider): boolean {
@@ -56,8 +56,7 @@ function matchPoctra(announce: AnnounceProviderInfo | undefined, provider: Octra
   if (pid === 'poctra' || pid === 'poctra-mobile') return true
   if (!announce) return false
   const rdns = lower(announce.rdns)
-  if (rdns === 'id.octra.poctra' || rdns === 'app.octra.poctra' || rdns.includes('poctra')) return true
-  return lower(announce.name).includes('poctra')
+  return rdns === 'id.octra.poctra' || rdns === 'app.octra.poctra'
 }
 
 export const WALLET_REGISTRY: WalletEntry[] = [

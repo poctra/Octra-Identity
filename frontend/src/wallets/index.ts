@@ -9,7 +9,7 @@ export type {
   WalletInfo,
 } from './types'
 
-export { walletDiscovery, listAllowedWallets } from './discovery'
+export { walletDiscovery } from './discovery'
 export { getWalletEntry } from './registry'
 export {
   ProviderClient,
