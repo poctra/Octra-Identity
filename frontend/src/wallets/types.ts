@@ -41,29 +41,30 @@ export interface OctraProvider {
 /**
  * Shape of `CustomEvent('octra:announceProvider').detail`.
  *
- * RFC-O-1 itself only requires the `provider`. Every compliant wallet
- * we've seen also ships an EIP-6963-shaped `info` object — name, rdns,
- * uuid, optional icon. We treat `info` as authoritative for identity.
+ * Poctra's discovery profile requires an EIP-6963-shaped metadata object.
+ * Incomplete announcements are ignored rather than assigned inferred branding.
  */
 export interface AnnounceProviderInfo {
-  uuid?:    string  // per-announcement UUID; useful for dedupe
-  name?:    string  // human-readable name
-  rdns?:    string  // reverse-DNS identifier (e.g. 'network.octra.octwa')
-  icon?:    string  // optional icon URL or data URI
+  uuid:     string  // per-page UUID v4
+  name:     string  // human-readable wallet name
+  rdns:     string  // reverse-DNS identifier (e.g. 'app.poctra.wallet')
+  icon:     string  // data:image URI supplied by the wallet
   version?: string
   homepage?: string
 }
 
 export interface AnnounceProviderDetail {
   provider: OctraProvider
-  info?:    AnnounceProviderInfo
+  info:     AnnounceProviderInfo
 }
 
 // ─── Wallet metadata + detected entry ────────────────────────────────────
 
 export interface WalletInfo {
-  /** Stable identifier — used to remember the user's last choice. */
+  /** Per-page provider UUID supplied by the announcement. */
   id:           string
+  /** Reverse-DNS identifier used to remember the selected wallet. */
+  providerIdentifier: string
   /** Display name shown in the picker. */
   displayName:  string
   /** Optional icon URL or data URI. */
@@ -76,7 +77,7 @@ export interface DetectedWallet {
   info:     WalletInfo
   provider: OctraProvider
   /** Whatever the wallet announced about itself. Useful for diagnostics. */
-  announce?: AnnounceProviderInfo
+  announce: AnnounceProviderInfo
 }
 
 // ─── Connection state surfaced to UI ─────────────────────────────────────

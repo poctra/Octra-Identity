@@ -484,7 +484,6 @@ function WalletPicker({
         <div className="wallet-options">
           {detected.map((entry) => {
             const icon = entry.info.iconUrl
-            const providerId = entry.provider.providerId ?? entry.info.id
             return (
               <button key={entry.info.id} className="wallet-option" disabled={connecting} onClick={() => onConnect(entry.info.id)}>
                 <span className="wallet-avatar">
@@ -492,7 +491,7 @@ function WalletPicker({
                 </span>
                 <span className="wallet-option-body">
                   <strong>{entry.info.displayName}</strong>
-                  <span>ID: {providerId}</span>
+                  <span>ID: {entry.info.providerIdentifier}</span>
                 </span>
               </button>
             )

@@ -10,7 +10,6 @@ export type {
 } from './types'
 
 export { walletDiscovery } from './discovery'
-export { getWalletEntry } from './registry'
 export {
   ProviderClient,
   type OctraNetworkInfo,

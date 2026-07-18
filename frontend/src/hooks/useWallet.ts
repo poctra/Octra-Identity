@@ -93,7 +93,7 @@ export function useWallet(): WalletState & WalletActions {
     if (client) return
     const preferred = loadPreferredWalletId()
     if (!preferred) return
-    const match = available.find((w) => w.info.id === preferred)
+    const match = available.find((w) => w.info.providerIdentifier === preferred)
     if (match) reattach(match)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [available])
@@ -216,7 +216,7 @@ export function useWallet(): WalletState & WalletActions {
       setError('wallet not detected')
       return
     }
-    savePreferredWalletId(walletId)
+    savePreferredWalletId(match.info.providerIdentifier)
     const c = new ProviderClient(match.provider)
     // Update React state in the background so the rest of the UI catches up,
     // but use the local `c` for the connect call so the popup fires
@@ -233,7 +233,7 @@ export function useWallet(): WalletState & WalletActions {
       setError('wallet not detected')
       return
     }
-    savePreferredWalletId(walletId)
+    savePreferredWalletId(match.info.providerIdentifier)
     reattach(match)
   }, [available, reattach])
 

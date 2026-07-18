@@ -1,8 +1,7 @@
 // RFC-O-1 provider discovery mirrors EIP-6963's request/announce model.
-// Announcements are the source of truth. The registry only enriches metadata
-// for known wallets and never filters a valid provider.
+// Announcements are the only source of truth. A provider is discoverable only
+// when it supplies complete EIP-6963-shaped metadata through RFC-O-1.
 
-import { findEntryForAnnounce } from './registry'
 import type {
   AnnounceProviderDetail,
   AnnounceProviderInfo,
@@ -36,7 +35,6 @@ class WalletDiscovery {
   rescan(): void {
     if (typeof window === 'undefined') return
     try { window.dispatchEvent(new Event('octra:requestProvider')) } catch { /* ignored */ }
-    this.captureGlobalProviders()
   }
 
   private start(): void {
@@ -44,8 +42,6 @@ class WalletDiscovery {
     this.started = true
 
     window.addEventListener('octra:announceProvider', this.onAnnounce as EventListener)
-    window.addEventListener('octra#initialized', this.captureGlobalProviders as EventListener)
-    window.addEventListener('poctra#initialized', this.captureGlobalProviders as EventListener)
 
     this.rescan()
     this.rescanTimer = window.setTimeout(this.rescanTick, 500)
@@ -71,47 +67,19 @@ class WalletDiscovery {
     this.acceptProvider((event as CustomEvent<AnnounceProviderDetail>).detail)
   }
 
-  private captureGlobalProviders = () => {
-    if (typeof window === 'undefined') return
-    const globals = window as Window & {
-      octra?: unknown
-      poctra?: unknown
-      octraProviders?: unknown
-      __poctraProviderInfo?: AnnounceProviderInfo
-    }
-    const candidates = [
-      globals.poctra,
-      ...(Array.isArray(globals.octraProviders) ? globals.octraProviders : []),
-      globals.octra,
-    ]
-
-    for (const provider of candidates.filter(isOctraProvider)) {
-      this.acceptProvider({
-        provider,
-        info: globals.__poctraProviderInfo ?? {
-          uuid: provider.providerId ?? 'embedded-octra-wallet',
-          name: provider.providerId ?? 'Octra Wallet',
-          rdns: provider.providerId === 'poctra' || provider.providerId === 'poctra-mobile'
-            ? 'id.octra.poctra'
-            : undefined,
-          version: provider.version,
-        },
-      })
-    }
-  }
-
   private acceptProvider(detail: AnnounceProviderDetail | undefined): void {
     if (!detail?.provider || !isOctraProvider(detail.provider)) return
-    const info = providerWalletInfo(detail.info, detail.provider)
-    if (!info) return
+    const announce = normalizeAnnouncement(detail.info)
+    if (!announce) return
+    const info = providerWalletInfo(announce)
 
     const existing = this.detected.get(info.id)
-    if (existing?.provider === detail.provider) return
+    if (existing?.provider === detail.provider && sameAnnouncement(existing.announce, announce)) return
 
     this.detected.set(info.id, {
       info,
       provider: detail.provider,
-      announce: detail.info,
+      announce,
     })
     this.emit()
   }
@@ -120,6 +88,20 @@ class WalletDiscovery {
     const snapshot = this.list()
     for (const listener of this.listeners) listener(snapshot)
   }
+}
+
+function sameAnnouncement(
+  left: AnnounceProviderInfo | undefined,
+  right: AnnounceProviderInfo | undefined,
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.uuid === right.uuid &&
+    left.name === right.name &&
+    left.rdns === right.rdns &&
+    left.icon === right.icon &&
+    left.version === right.version &&
+    left.homepage === right.homepage
 }
 
 function isOctraProvider(value: unknown): value is OctraProvider {
@@ -132,31 +114,35 @@ function isOctraProvider(value: unknown): value is OctraProvider {
 }
 
 function providerWalletInfo(
-  announce: AnnounceProviderInfo | undefined,
-  provider: OctraProvider,
-): WalletInfo | null {
-  const known = findEntryForAnnounce(announce, provider)?.info
-  const announcedId = safeProviderIdentity(provider.providerId) ??
-    safeProviderIdentity(announce?.rdns) ??
-    safeProviderIdentity(announce?.uuid)
-  const id = known?.id ?? announcedId
-  if (!id) return null
-
+  announce: AnnounceProviderInfo & { uuid: string; name: string; rdns: string; icon: string },
+): WalletInfo {
   return {
-    id,
-    displayName: known?.displayName ??
-      cleanLabel(announce?.name, 64) ??
-      cleanLabel(provider.providerId, 64) ??
-      'Octra Wallet',
-    iconUrl: safeWalletIcon(announce?.icon) ?? known?.iconUrl,
-    homepageUrl: safeHomepage(announce?.homepage) ?? known?.homepageUrl,
+    id: announce.uuid,
+    providerIdentifier: announce.rdns,
+    displayName: announce.name,
+    iconUrl: announce.icon,
+    homepageUrl: safeHomepage(announce?.homepage),
   }
 }
 
-function safeProviderIdentity(value: string | undefined): string | undefined {
-  const identity = value?.trim().toLowerCase()
-  if (!identity || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(identity)) return undefined
-  return identity
+function normalizeAnnouncement(
+  value: AnnounceProviderInfo | undefined,
+): (AnnounceProviderInfo & { uuid: string; name: string; rdns: string; icon: string }) | null {
+  const uuid = value?.uuid?.trim().toLowerCase()
+  const name = cleanLabel(value?.name, 64)
+  const rdns = normalizeRdns(value?.rdns)
+  const icon = safeWalletIcon(value?.icon)
+  if (!uuid || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid)) return null
+  if (!name || !rdns || !icon) return null
+  return { ...value, uuid, name, rdns, icon }
+}
+
+function normalizeRdns(value: string | undefined): string | undefined {
+  const rdns = value?.trim().toLowerCase()
+  if (!rdns || rdns.length > 253 || !rdns.includes('.')) return undefined
+  return rdns.split('.').every((label) =>
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
+  ) ? rdns : undefined
 }
 
 function cleanLabel(value: string | undefined, maxLength: number): string | undefined {
