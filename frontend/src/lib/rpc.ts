@@ -92,7 +92,7 @@ const MAX_RETRIES    = 3
 const BASE_DELAY_MS  = 180
 const RPC_TIMEOUT_MS = Number(import.meta.env.VITE_ONS_RPC_TIMEOUT_MS ?? 14000)
 const VIEW_CACHE_MS  = Number(import.meta.env.VITE_ONS_VIEW_CACHE_MS ?? 8000)
-const VIEW_RPC_CONCURRENCY = Number(import.meta.env.VITE_ONS_VIEW_RPC_CONCURRENCY ?? 2)
+const VIEW_RPC_CONCURRENCY = Number(import.meta.env.VITE_ONS_VIEW_RPC_CONCURRENCY ?? 4)
 const RPC_BATCH_WINDOW_MS = Number(import.meta.env.VITE_ONS_RPC_BATCH_MS ?? 12)
 const RPC_BATCH_MAX_SIZE = Number(import.meta.env.VITE_ONS_RPC_BATCH_SIZE ?? 32)
 
@@ -325,7 +325,7 @@ function unwrapViewResult<T>(res: unknown): T {
 }
 
 async function withViewRpcLimit<T>(task: () => Promise<T>): Promise<T> {
-  const limit = Number.isFinite(VIEW_RPC_CONCURRENCY) && VIEW_RPC_CONCURRENCY > 0 ? VIEW_RPC_CONCURRENCY : 2
+  const limit = Number.isFinite(VIEW_RPC_CONCURRENCY) && VIEW_RPC_CONCURRENCY > 0 ? VIEW_RPC_CONCURRENCY : 4
   if (activeViewRpc >= limit) {
     await new Promise<void>((resolve) => viewRpcQueue.push(resolve))
   }

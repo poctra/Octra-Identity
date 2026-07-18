@@ -63,7 +63,7 @@ type TxModalState = TxProgressEvent & {
 const THEME_KEY = 'octra-id-theme'
 const KNOWN_OWNED_NAMES_KEY = 'octra-id-known-owned-names'
 const OWNER_NAMES_CACHE_KEY = 'octra-id-owner-names-cache'
-const LEGACY_OWNER_CACHE_MS = 30_000
+const NAMES_RENDER_PAGE_SIZE = 10
 
 export default function App() {
   const wallet = useWallet()
@@ -118,27 +118,30 @@ export default function App() {
       setPrimary(cachedNames.primary)
     }
 
-    const nextConfig = await loadConfig()
-    configRef.current = nextConfig
-    setConfig(nextConfig)
-    if (tab === 'market') {
-      setListings(await loadActiveListings())
+    const applyConfig = (nextConfig: OnsConfig) => {
+      configRef.current = nextConfig
+      setConfig(nextConfig)
     }
+
+    if (tab === 'market') {
+      const [nextConfig, nextListings] = await Promise.all([
+        loadConfig(),
+        loadActiveListings((partial) => setListings(partial)),
+      ])
+      applyConfig(nextConfig)
+      setListings(nextListings)
+      return
+    }
+
     if (address && tab === 'names') {
-      if (cachedNames) {
+      if (cachedNames?.version != null) {
+        const [nextConfig, currentVersion] = await Promise.all([
+          loadConfig(),
+          ownerVersionOf(address),
+        ])
+        applyConfig(nextConfig)
         const revalidated = revalidateOwnerEntries(cachedNames.entries, nextConfig)
-        let cacheCurrent = cachedNames.version == null
-          ? Date.now() - cachedNames.savedAt < LEGACY_OWNER_CACHE_MS
-          : false
-        if (cachedNames.version != null) {
-          try {
-            cacheCurrent = await ownerVersionOf(address) === cachedNames.version
-          } catch {
-            // Preserve the immediately rendered stale snapshot during a transient RPC failure.
-            cacheCurrent = true
-          }
-        }
-        if (cacheCurrent) {
+        if (currentVersion === cachedNames.version) {
           const currentPrimary = revalidated.some((entry) => entry.label === cachedNames.primary && entry.record.isActive)
             ? cachedNames.primary
             : ''
@@ -146,13 +149,30 @@ export default function App() {
           setPrimary(currentPrimary)
           return
         }
+
+        const snapshot = await loadOwnerNamesSnapshot(address)
+        const names = await supplementOwnerNames(address, snapshot.entries, sameAddr(nextConfig.admin, address))
+        setOwned(names)
+        setPrimary(snapshot.primary)
+        writeOwnerNamesCache(address, names, snapshot.primary, snapshot.version)
+        return
       }
-      const snapshot = await loadOwnerNamesSnapshot(address, nextConfig)
-      const names = await supplementOwnerNames(address, snapshot.entries, nextConfig, sameAddr(nextConfig.admin, address))
+
+      const [nextConfig, snapshot] = await Promise.all([
+        loadConfig(),
+        loadOwnerNamesSnapshot(address),
+      ])
+      applyConfig(nextConfig)
+      const names = await supplementOwnerNames(address, snapshot.entries, sameAddr(nextConfig.admin, address))
       setOwned(names)
       setPrimary(snapshot.primary)
       writeOwnerNamesCache(address, names, snapshot.primary, snapshot.version)
-    } else if (!address) {
+      return
+    }
+
+    const nextConfig = await loadConfig()
+    applyConfig(nextConfig)
+    if (!address) {
       setOwned([])
       setPrimary('')
     }
@@ -187,7 +207,7 @@ export default function App() {
     setBusy(true)
     setSearchLoading(true)
     try {
-      const next = await loadName(label, config ?? undefined)
+      const next = await loadName(label)
       setRecord(next)
       setNotice(null)
     } catch (err) {
@@ -196,7 +216,7 @@ export default function App() {
       setBusy(false)
       setSearchLoading(false)
     }
-  }, [config, query])
+  }, [query])
 
   const runWrite = useCallback(async (
     label: string,
@@ -237,7 +257,7 @@ export default function App() {
       const invalidateOwnedCache = shouldInvalidateOwnerNamesCache(method)
       if (invalidateOwnedCache) invalidateOwnerNamesCache(address)
       await refresh({ forceOwned: invalidateOwnedCache })
-      if (label) await reconcileOwnedLabel(label, address, setOwned, config ?? undefined)
+      if (label) await reconcileOwnedLabel(label, address, setOwned)
       if (method === 'register_name' || method === 'buy_name') setTab('names')
       if (label && tab === 'search') await searchName(label, { showResult: false })
     } catch (err) {
@@ -838,6 +858,15 @@ function MarketplacePanel({
   loading: boolean
   onBuy: (listing: ListingEntry) => void
 }) {
+  const [visibleCount, setVisibleCount] = useState(NAMES_RENDER_PAGE_SIZE)
+
+  useEffect(() => {
+    setVisibleCount(NAMES_RENDER_PAGE_SIZE)
+  }, [filter, sortMode])
+
+  const visibleListings = listings.slice(0, visibleCount)
+  const hasMore = visibleListings.length < listings.length
+
   return (
     <section className="panel-stack">
       <div className="screen-heading">
@@ -853,16 +882,32 @@ function MarketplacePanel({
         <button className={sortMode === 'price' ? 'mini active' : 'mini'} onClick={() => setSortMode('price')}>price</button>
         <button className={sortMode === 'name' ? 'mini active' : 'mini'} onClick={() => setSortMode('name')}>name</button>
       </div>
-      {loading ? (
+      {loading && listings.length === 0 ? (
         <LoadingState title="Loading market" text="Fetching active listings." />
       ) : listings.length === 0 ? (
         <EmptyState icon={<Tag />} title="No active listings" text="Listed names will appear here." />
       ) : (
-        <div className="listing-list">
-          {listings.map((listing) => (
-            <ListingCard key={listing.label} listing={listing} address={address} busy={busy} onBuy={onBuy} />
-          ))}
-        </div>
+        <>
+          {loading && <p className="market-sync-status" role="status">Syncing remaining listings...</p>}
+          <div className="listing-list">
+            {visibleListings.map((listing) => (
+              <ListingCard key={listing.label} listing={listing} address={address} busy={busy} onBuy={onBuy} />
+            ))}
+          </div>
+          {hasMore && (
+            <div className="data-pagination">
+              <button
+                className="data-load-more"
+                type="button"
+                onClick={() => setVisibleCount((current) => Math.min(current + NAMES_RENDER_PAGE_SIZE, listings.length))}
+              >
+                <ChevronDown aria-hidden="true" />
+                Load more
+                <span>{visibleListings.length} of {listings.length}</span>
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   )
@@ -921,6 +966,12 @@ function NamesPanel({
   onWrite: (label: string, method: string, params: unknown[], amountOu?: bigint) => void
 }) {
   const [expandedLabel, setExpandedLabel] = useState<string | null>(null)
+  const [visibleCount, setVisibleCount] = useState(NAMES_RENDER_PAGE_SIZE)
+
+  useEffect(() => {
+    setVisibleCount(NAMES_RENDER_PAGE_SIZE)
+    setExpandedLabel(null)
+  }, [address])
 
   useEffect(() => {
     if (expandedLabel && !owned.some((entry) => entry.label === expandedLabel)) {
@@ -928,13 +979,19 @@ function NamesPanel({
     }
   }, [expandedLabel, owned])
 
-  const content = !address
-    ? <EmptyState icon={<Wallet />} title="Wallet disconnected" text="Connect wallet to manage names." />
-    : loading
-      ? <LoadingState title="Loading names" text="Fetching names owned by this wallet." />
-      : owned.length === 0
-        ? <EmptyState icon={<UserRound />} title="No owned names" text="Registered names appear here." />
-        : owned.map((entry) => (
+  let content: ReactNode
+  if (!address) {
+    content = <EmptyState icon={<Wallet />} title="Wallet disconnected" text="Connect wallet to manage names." />
+  } else if (loading) {
+    content = <LoadingState title="Loading names" text="Fetching names owned by this wallet." />
+  } else if (owned.length === 0) {
+    content = <EmptyState icon={<UserRound />} title="No owned names" text="Registered names appear here." />
+  } else {
+    const visibleNames = owned.slice(0, visibleCount)
+    const hasMore = visibleNames.length < owned.length
+    content = (
+      <>
+        {visibleNames.map((entry) => (
             <ManageNameCard
               key={entry.label}
               entry={entry}
@@ -946,14 +1003,33 @@ function NamesPanel({
               onToggle={() => setExpandedLabel((current) => current === entry.label ? null : entry.label)}
               onWrite={onWrite}
             />
-          ))
+        ))}
+        {hasMore && (
+          <div className="data-pagination">
+            <button
+              className="data-load-more"
+              type="button"
+              onClick={() => setVisibleCount((current) => Math.min(current + NAMES_RENDER_PAGE_SIZE, owned.length))}
+            >
+              <ChevronDown aria-hidden="true" />
+              Load more
+              <span>{visibleNames.length} of {owned.length}</span>
+            </button>
+          </div>
+        )}
+      </>
+    )
+  }
 
   return (
     <section className="panel-stack">
       <div className="screen-heading">
         <div>
           <span className="screen-kicker">Your identity</span>
-          <h1>My names</h1>
+          <div className="names-heading-title">
+            <h1>My names</h1>
+            {address && !loading && <span className="names-total">{owned.length} total</span>}
+          </div>
           <p>Manage destinations, subdomains, renewals, and ownership.</p>
         </div>
       </div>
@@ -1425,7 +1501,6 @@ function humanizeMethod(method: string): string {
 async function supplementOwnerNames(
   address: string,
   indexed: OwnerEntry[],
-  meta?: Pick<OnsConfig, 'currentEpoch' | 'graceEpochs'>,
   includeManagedReserved = false,
 ): Promise<OwnerEntry[]> {
   const indexedLabels = new Set(indexed.map((entry) => entry.label))
@@ -1437,7 +1512,7 @@ async function supplementOwnerNames(
 
   const extras: Array<OwnerEntry | null> = await Promise.all(extraLabels.map(async (label): Promise<OwnerEntry | null> => {
     try {
-      const record = await loadName(label, meta)
+      const record = await loadName(label)
       return sameAddr(record.owner, address) ? { label, record, subdomains: [] as OwnerEntry['subdomains'] } : null
     } catch {
       return null
@@ -1452,14 +1527,13 @@ async function reconcileOwnedLabel(
   label: string,
   address: string,
   updateOwned: (updater: (prev: OwnerEntry[]) => OwnerEntry[]) => void,
-  meta?: Pick<OnsConfig, 'currentEpoch' | 'graceEpochs'>,
 ) {
   const normalized = normalizeLabel(label)
   if (!normalized || !address) return
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      const record = await loadName(normalized, meta)
+      const record = await loadName(normalized)
       const isOwner = sameAddr(record.owner, address)
       updateOwned((prev) => {
         if (!isOwner) return prev.filter((entry) => entry.label !== normalized)

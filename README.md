@@ -39,8 +39,9 @@ enforces the 25-row maximum.
 
 The frontend renders a cached My Names snapshot immediately, validates it
 against the owner version, and only downloads pages after a relevant on-chain
-change. Frontend builds retain legacy view fallbacks so they can remain usable
-during a staged contract rollout.
+change. Frontend builds target the versioned snapshot contract directly;
+configuration, owner data, listings, and subdomains no longer fan out through
+legacy per-field views.
 
 ## Repository Structure
 
