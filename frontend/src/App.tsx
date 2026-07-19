@@ -562,7 +562,6 @@ function NoticeBar({ notice, onClear }: { notice: NonNullable<Notice>; onClear: 
 }
 
 function TxProgressModal({ tx, onClose }: { tx: TxModalState; onClose: () => void }) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
   const done = tx.stage === 'confirmed' || tx.stage === 'reverted' || tx.stage === 'rejected'
   const failed = tx.stage === 'reverted' || tx.stage === 'rejected'
   const title = failed ? 'Transaction failed' : tx.stage === 'confirmed' ? 'Transaction confirmed' : 'Submitting transaction'
@@ -596,68 +595,61 @@ function TxProgressModal({ tx, onClose }: { tx: TxModalState; onClose: () => voi
     },
   ]
 
-  useEffect(() => {
-    const dialog = dialogRef.current
-    if (!dialog || dialog.open) return
-
-    dialog.showModal()
-    return () => {
-      if (dialog.open) dialog.close()
-    }
-  }, [])
-
-  return (
-    <dialog
-      ref={dialogRef}
-      className="tx-progress-dialog"
-      aria-label="Transaction progress"
-      onCancel={(event) => {
-        event.preventDefault()
-        onClose()
-      }}
+  return createPortal(
+    <div
+      className="tx-progress-backdrop"
       onClick={(event) => {
         if (done && event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="tx-modal-head">
-        <div>
-          <span>{humanizeMethod(tx.method)}</span>
-          <strong>{title}</strong>
-          {tx.label && <p>{tx.label}.oct</p>}
-        </div>
-        <button className="sheet-icon" onClick={onClose} aria-label={done ? 'Close transaction progress' : 'Hide transaction progress'}>
-          <X />
-        </button>
-      </div>
-
-      <div className="tx-stepper">
-        {steps.map((step, index) => (
-          <div className={`tx-step ${step.state}`} key={step.title}>
-            <div className="tx-step-rail">
-              <span className="tx-step-dot">
-                {step.state === 'active' ? <span className="tx-spinner" /> : step.state === 'error' ? <X /> : step.state === 'done' ? <Check /> : null}
-              </span>
-              {index !== steps.length - 1 && <span className="tx-step-line" />}
-            </div>
-            <div>
-              <strong>{step.title}</strong>
-              <p>{step.text}</p>
-            </div>
+      <section
+        className="tx-progress-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Transaction progress"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="tx-modal-head">
+          <div>
+            <span>{humanizeMethod(tx.method)}</span>
+            <strong>{title}</strong>
+            {tx.label && <p>{tx.label}.oct</p>}
           </div>
-        ))}
-      </div>
+          <button className="sheet-icon" onClick={onClose} aria-label={done ? 'Close transaction progress' : 'Hide transaction progress'}>
+            <X />
+          </button>
+        </div>
 
-      {tx.txHash && (
-        <a className="tx-modal-link" href={explorerLink(EXPLORER_HOST, 'tx', tx.txHash)} target="_blank" rel="noreferrer">
-          View transaction
-          <ExternalLink />
-        </a>
-      )}
+        <div className="tx-stepper">
+          {steps.map((step, index) => (
+            <div className={`tx-step ${step.state}`} key={step.title}>
+              <div className="tx-step-rail">
+                <span className="tx-step-dot">
+                  {step.state === 'active' ? <span className="tx-spinner" /> : step.state === 'error' ? <X /> : step.state === 'done' ? <Check /> : null}
+                </span>
+                {index !== steps.length - 1 && <span className="tx-step-line" />}
+              </div>
+              <div>
+                <strong>{step.title}</strong>
+                <p>{step.text}</p>
+              </div>
+            </div>
+          ))}
+        </div>
 
-      <button className="primary-action tx-modal-action" onClick={onClose}>
-        {done ? 'Done' : 'Hide'}
-      </button>
-    </dialog>
+        {tx.txHash && (
+          <a className="tx-modal-link" href={explorerLink(EXPLORER_HOST, 'tx', tx.txHash)} target="_blank" rel="noreferrer">
+            View transaction
+            <ExternalLink />
+          </a>
+        )}
+
+        <button className="primary-action tx-modal-action" onClick={onClose}>
+          {done ? 'Done' : 'Hide'}
+        </button>
+      </section>
+    </div>,
+    document.body,
   )
 }
 
