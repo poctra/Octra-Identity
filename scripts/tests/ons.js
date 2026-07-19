@@ -107,6 +107,7 @@ module.exports = async ({ aml, rpc, config, contract, abi, keypair, helpers }) =
       'get_subdomain_page',
       'get_owner_version',
       'get_listing_version',
+      'prune_listing',
     ]) {
       if (!methodByName(method)) throw new Error(`${method} missing`)
     }
@@ -161,6 +162,18 @@ module.exports = async ({ aml, rpc, config, contract, abi, keypair, helpers }) =
       if (await viewBool('is_available', [label])) throw new Error(`${label} available unexpectedly`)
     }
   })
+  await run('invalid dynamic keys return safe empty views', async () => {
+    const invalid = 'bad#label|row'
+    if (await view('resolve', [invalid]) !== ZERO) throw new Error('invalid label resolved')
+    if (await view('owner_of', [invalid]) !== ZERO) throw new Error('invalid label returned owner')
+    if (await viewInt('expiry_of', [invalid]) !== 0) throw new Error('invalid label returned expiry')
+    const exact = snapshot(await view('get_name_snapshot', [invalid]), 4)
+    if (exact.rows.length !== 0) throw new Error('invalid label injected a snapshot row')
+    const subdomains = snapshot(await view('get_subdomain_page', [invalid, 0, 25, -1]), 7)
+    if (subdomains.rows.length !== 0 || Number(subdomains.header[3]) !== 0) {
+      throw new Error('invalid parent returned subdomain rows')
+    }
+  })
   await run('register rejects special characters', async () => {
     return expectRevert('register_name', ['bad_name', DEPLOYER, 1], PRICE, /invalid label/i)
   })
@@ -204,6 +217,15 @@ module.exports = async ({ aml, rpc, config, contract, abi, keypair, helpers }) =
     dest = await view('resolve', [label])
     if (dest !== DEPLOYER) throw new Error(`restored resolver ${dest}`)
   })
+  await run('unchanged resolver does not invalidate snapshots', async () => {
+    const ownerVersion = await viewInt('get_owner_version', [DEPLOYER])
+    const registryVersion = Number(snapshot(await view('get_name_snapshot', [label]), 4).header[1])
+    await send('set_record', [label, DEPLOYER])
+    if (await viewInt('get_owner_version', [DEPLOYER]) !== ownerVersion) throw new Error('owner version changed on no-op')
+    if (Number(snapshot(await view('get_name_snapshot', [label]), 4).header[1]) !== registryVersion) {
+      throw new Error('registry version changed on no-op')
+    }
+  })
   await run('root is deployer primary on deploy', async () => {
     const primary = await view('primary_of', [DEPLOYER])
     if (primary !== 'root') throw new Error(`primary ${primary} != root`)
@@ -224,6 +246,12 @@ module.exports = async ({ aml, rpc, config, contract, abi, keypair, helpers }) =
 
   banner('subdomains')
   const sub = uniqueLabel('sub')
+  await run(`register one-character subdomain x.${label}`, async () => {
+    await send('set_sub_record', [label, 'x', DEPLOYER])
+    if (await view('resolve_subdomain', [label, 'x']) !== DEPLOYER) throw new Error('one-character subdomain did not resolve')
+    if (await view('resolve_name', [`x.${label}`]) !== DEPLOYER) throw new Error('one-character full name did not resolve')
+    await send('release_subdomain', [label, 'x'])
+  })
   await run(`register ${sub}.${label}`, async () => {
     const versionBefore = Number(snapshot(await view('get_subdomain_page', [label, 0, 25, -1]), 7).header[1])
     await send('set_sub_record', [label, sub, DEPLOYER])
@@ -285,6 +313,10 @@ module.exports = async ({ aml, rpc, config, contract, abi, keypair, helpers }) =
     if (!page.rows.some((row) => row[0] === label && Number(row[2]) === PRICE * 2)) {
       throw new Error('listing missing from snapshot page')
     }
+    await expectRevert('prune_listing', [label], 0, /listing active/i)
+    const unchangedVersion = await viewInt('get_listing_version')
+    await send('list_name', [label, PRICE * 2])
+    if (await viewInt('get_listing_version') !== unchangedVersion) throw new Error('listing version changed on no-op')
     await send('cancel_listing', [label])
     const after = await viewInt('listing_price_of', [label])
     if (after !== 0) throw new Error(`listing survived: ${after}`)

@@ -18,6 +18,27 @@ function log(label, value) {
   console.log(`${label.padEnd(18)} ${value}`)
 }
 
+function assertUniqueJumpLabels(disassembly) {
+  if (!disassembly) return
+
+  const labels = new Map()
+  for (const [index, line] of String(disassembly).split(/\r?\n/).entries()) {
+    const match = line.match(/^JDEST\s+(\d+)$/)
+    if (!match) continue
+    const locations = labels.get(match[1]) ?? []
+    locations.push(index + 1)
+    labels.set(match[1], locations)
+  }
+
+  const duplicates = [...labels.entries()].filter(([, locations]) => locations.length > 1)
+  if (duplicates.length > 0) {
+    const detail = duplicates
+      .map(([label, locations]) => `${label} at lines ${locations.join(', ')}`)
+      .join('; ')
+    throw new Error(`unsafe compiler output: duplicate jump label(s): ${detail}`)
+  }
+}
+
 ;(async () => {
   const { config } = buildConfig()
   setRpcUrl(config.rpcUrl)
@@ -45,6 +66,9 @@ function log(label, value) {
     process.exit(1)
   }
 
+  const disassembly = result.disassembly ?? result.disasm
+  assertUniqueJumpLabels(disassembly)
+
   let abi = result.abi
   if (typeof abi === 'string') {
     try { abi = JSON.parse(abi) } catch { /* keep as string */ }
@@ -69,7 +93,7 @@ function log(label, value) {
     instruction_count: result.instruction_count ?? result.instructions,
     version:           result.version,
     abi,
-    disassembly:       result.disassembly,
+    disassembly,
     verification:      result.verification,
     certificate:       result.certificate,
   }, null, 2))

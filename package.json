@@ -16,6 +16,7 @@
     "save-abi:devnet": "node scripts/save_abi.js",
     "verify:devnet": "node scripts/verify.js",
     "test:devnet": "node scripts/test.js",
+    "stress:devnet": "node scripts/stress_ons.js",
     "static-verify:devnet": "node scripts/static_verify.js"
   },
   "dependencies": {

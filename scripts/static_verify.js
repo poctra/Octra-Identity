@@ -21,7 +21,7 @@ const checks = [
   },
   {
     code: 'BUY_SIGNATURE_NO_VIEW_PK',
-    ok: /payable\s+fn\s+buy_name\s*\(\s*label:\s*string,\s*new_destination:\s*string\s*\)/.test(source),
+    ok: /payable\s+(?:nonreentrant\s+)?fn\s+buy_name\s*\(\s*label:\s*string,\s*new_destination:\s*string\s*\)/.test(source),
     detail: 'buy_name(label, destination)',
   },
   {
@@ -174,6 +174,64 @@ const checks = [
       /self\.name_generation\[label\]\s*\+=\s*1/.test(source) &&
       /self\.sub_generation\[parent_label\]\[sub_label\]\s*!=\s*self\.name_generation\[parent_label\]/.test(source),
     detail: 'stale subdomains cannot revive after parent release or re-registration',
+  },
+  {
+    code: 'SUBDOMAIN_RESOLVER_SHORT_LABEL_RULE',
+    ok: /view\s+fn\s+resolve_subdomain[\s\S]*?if\s+!is_valid_sub_label_value\s*\(\s*sub_label\s*\)\s*\{\s*return\s+"0"\s*\}/.test(source),
+    detail: 'resolver accepts the same 1-63 character subdomain labels as writes',
+  },
+  {
+    code: 'PUBLIC_MUTATOR_LABEL_GUARDS',
+    ok: /private\s+fn\s+require_publicly_transferable\s*\(\s*label:\s*string\s*\)[\s\S]*?require_valid_label\s*\(\s*label\s*\)/.test(source) &&
+      /fn\s+set_primary\s*\(\s*label:\s*string\s*\)[\s\S]*?require_valid_label\s*\(\s*label\s*\)/.test(source) &&
+      /fn\s+cancel_listing\s*\(\s*label:\s*string\s*\)[\s\S]*?require_valid_label\s*\(\s*label\s*\)/.test(source),
+    detail: 'every public label mutation validates its dynamic storage key',
+  },
+  {
+    code: 'SAFE_DYNAMIC_KEY_VIEWS',
+    ok: /view\s+fn\s+resolve\s*\(\s*label:\s*string\s*\)[\s\S]*?if\s+!is_valid_label_value\s*\(\s*label\s*\)\s*\{\s*return\s+"0"\s*\}/.test(source) &&
+      /view\s+fn\s+get_name_snapshot[\s\S]*?if\s+!is_valid_label_value\s*\(\s*label\s*\)\s*\{\s*return\s+out\s*\}/.test(source) &&
+      /view\s+fn\s+subdomain_key_at[\s\S]*?if\s+idx\s*<\s*0\s*\{\s*return\s+""\s*\}/.test(source),
+    detail: 'invalid view keys and indexes return typed empty values without malformed snapshots',
+  },
+  {
+    code: 'ACTIVE_LISTING_PROJECTION',
+    ok: /private\s+fn\s+has_active_listing/.test(source) &&
+      /self\.name_owner\[label\]\s*!=\s*seller/.test(source) &&
+      /epoch\s*>\s*exp/.test(source) &&
+      (source.match(/if\s+!has_active_listing\s*\(\s*label\s*\)/g) ?? []).length >= 4,
+    detail: 'expired, orphaned, and inconsistent listings are never exposed as purchasable',
+  },
+  {
+    code: 'PERMISSIONLESS_STALE_LISTING_PRUNE',
+    ok: /fn\s+prune_listing\s*\(\s*label:\s*string\s*\):\s*bool/.test(source) &&
+      /require\s*\(\s*!has_active_listing\s*\(\s*label\s*\)\s*,\s*"listing active"\s*\)/.test(source) &&
+      /listing_remove\s*\(\s*label\s*\)/.test(source),
+    detail: 'any caller can compact stale listing slots without changing name ownership',
+  },
+  {
+    code: 'LAPSED_LISTING_CANNOT_REVIVE_ON_RENEWAL',
+    ok: /fn\s+renew_name[\s\S]*?if\s+epoch\s*>\s*cur_expiry\s*&&\s*listing_state[\s\S]*?listing_remove\s*\(\s*label\s*\)[\s\S]*?emit\s+NameUnlisted\s*\(\s*label\s*\)/.test(source),
+    detail: 'renewing after expiry clears stale sale authorization before the name becomes active again',
+  },
+  {
+    code: 'AUTOMATIC_CLEANUP_EVENTS',
+    ok: /private\s+fn\s+clear_listing_and_reverse[\s\S]*?emit\s+PrimaryCleared\s*\(\s*prev_owner\s*\)/.test(source) &&
+      /private\s+fn\s+clear_listing_and_reverse[\s\S]*?emit\s+NameUnlisted\s*\(\s*label\s*\)/.test(source),
+    detail: 'automatic listing and reverse-record cleanup remains observable through events',
+  },
+  {
+    code: 'VALUE_EXIT_REENTRANCY_GUARDS',
+    ok: /nonreentrant\s+fn\s+withdraw_fees/.test(source) &&
+      /payable\s+nonreentrant\s+fn\s+buy_name/.test(source),
+    detail: 'all native-value exit paths use the compiler reentrancy guard',
+  },
+  {
+    code: 'ADMIN_RECOVERY_GUARDS',
+    ok: /require\s*\(\s*to\s*!=\s*self_addr\s*,\s*"cannot withdraw to self"\s*\)/.test(source) &&
+      /require\s*\(\s*next_owner\s*!=\s*self\.owner\s*,\s*"already owner"\s*\)/.test(source) &&
+      /require\s*\(\s*next_owner\s*!=\s*self_addr\s*,\s*"contract cannot own itself"\s*\)/.test(source),
+    detail: 'fee withdrawal and two-step ownership cannot target unrecoverable contract states',
   },
   {
     code: 'CALLER_BASED_NAME_OWNERSHIP',

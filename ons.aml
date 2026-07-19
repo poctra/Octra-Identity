@@ -28,6 +28,12 @@
 //   - Snapshot pages are capped at 25 rows. Subsequent pages carry the version
 //     returned by page zero so swap-and-pop mutations cannot silently produce
 //     duplicate or missing rows during a read.
+//   - Every public label read validates its dynamic storage key first. Invalid
+//     lookups return a typed empty value instead of touching arbitrary paths.
+//   - Listing views expose only listings whose seller still owns an active
+//     name. Expired or inconsistent index slots are projected as inactive.
+//   - Lifecycle cleanup emits listing and primary events for every observable
+//     state transition, including automatic cleanup during transfer/reclaim.
 //
 // Reserved AML parameter names avoided: cipher / pubkey / caller / origin /
 // value / self / self_addr.
@@ -83,10 +89,12 @@ contract OctraNameService {
     sub_count:         map[string]int
     sub_count_generation: map[string]int
 
-    // Listing enumeration index (swap-and-pop)
+    // Listing enumeration index (swap-and-pop). Expired listings remain as
+    // bounded pagination slots until the next lifecycle mutation, but listing
+    // views project those stale slots with price 0 and seller 0.
     //   listing_keys[i]      = label at slot i       (0 <= i < count)
     //   listing_index[label] = slot + 1              (0 = not listed)
-    //   listing_count        = number of active listings
+    //   listing_count        = number of indexed listing slots
     listing_keys:  map[int]string
     listing_index: map[string]int
     listing_count: int
@@ -195,20 +203,34 @@ contract OctraNameService {
     return append_field(payload, to_string(field))
   }
 
-  private fn append_address_field(payload: string, field: address): string {
-    return append_field(payload, to_string(field))
+  private fn has_active_listing(label: string): bool {
+    if !is_valid_label_value(label) { return false }
+    let price = self.name_listing_price[label]
+    if price <= 0 { return false }
+    let seller = self.name_listing_seller[label]
+    if seller == "" || seller == "0" { return false }
+    if self.name_owner[label] != seller { return false }
+    let exp = self.name_expiry[label]
+    if exp == 0 || epoch > exp { return false }
+    return true
   }
 
   private fn append_name_row(payload: string, label: string): string {
     let out = concat(payload, "#")
     out = concat(out, label)
-    out = append_address_field(out, self.name_owner[label])
+    out = append_field(out, to_string(self.name_owner[label]))
     out = append_field(out, self.name_destination[label])
     out = append_int_field(out, self.name_expiry[label])
     out = append_int_field(out, self.name_registered_at[label])
     out = append_int_field(out, self.name_generation[label])
-    out = append_int_field(out, self.name_listing_price[label])
-    out = append_address_field(out, self.name_listing_seller[label])
+    let listing_price = self.name_listing_price[label]
+    let listing_seller = self.name_listing_seller[label]
+    if !has_active_listing(label) {
+      listing_price = 0
+      listing_seller = "0"
+    }
+    out = append_int_field(out, listing_price)
+    out = append_field(out, to_string(listing_seller))
     let reserved = 0
     if is_reserved_name(label) { reserved = 1 }
     out = append_int_field(out, reserved)
@@ -291,6 +313,7 @@ contract OctraNameService {
   }
 
   private fn require_publicly_transferable(label: string) {
+    require_valid_label(label)
     require(!is_reserved_name(label), "reserved name locked")
   }
 
@@ -321,13 +344,19 @@ contract OctraNameService {
   }
 
   private fn clear_listing_and_reverse(label: string, prev_owner: address) {
+    let had_listing = self.name_listing_price[label] > 0 || self.name_listing_seller[label] != "" || self.listing_index[label] > 0
+    let was_indexed = self.owner_index[prev_owner][label] > 0
+    let had_primary = self.reverse_primary[prev_owner] == label
     listing_remove(label)
     self.name_listing_price[label]  = 0
     self.name_listing_seller[label] = ""
     owner_index_remove(prev_owner, label)
-    if self.reverse_primary[prev_owner] == label {
+    if had_primary {
       self.reverse_primary[prev_owner] = ""
+      if !was_indexed { touch_owner(prev_owner) }
+      emit PrimaryCleared(prev_owner)
     }
+    if had_listing { emit NameUnlisted(label) }
   }
 
   private fn sub_index_add(parent_label: string, sub_label: string) {
@@ -441,6 +470,7 @@ contract OctraNameService {
     require(caller == self.name_owner[label], "not owner")
     require(epoch <= self.name_expiry[label], "expired")
     assert_address(resolver)
+    if self.name_destination[label] == resolver { return }
     self.name_destination[label] = resolver
     touch_registry()
     touch_owner(caller)
@@ -464,6 +494,7 @@ contract OctraNameService {
 
   fn pause(): bool {
     only_admin()
+    require(!self.paused, "already paused")
     self.paused = true
     touch_config()
     emit Paused(caller)
@@ -472,6 +503,7 @@ contract OctraNameService {
 
   fn unpause(): bool {
     only_admin()
+    require(self.paused, "not paused")
     self.paused = false
     touch_config()
     emit Unpaused(caller)
@@ -481,6 +513,7 @@ contract OctraNameService {
   fn set_registration_price(new_price: int): bool {
     only_admin()
     require(new_price > 0, "price must be > 0")
+    if self.price_per_year == new_price { return true }
     self.price_per_year = new_price
     touch_config()
     emit PriceUpdated(new_price)
@@ -490,6 +523,7 @@ contract OctraNameService {
   fn set_marketplace_fee_bps(new_bps: int): bool {
     only_admin()
     require(new_bps >= 0 && new_bps <= 1000, "bps out of range")
+    if self.fee_bps == new_bps { return true }
     self.fee_bps = new_bps
     touch_config()
     emit FeeUpdated(new_bps)
@@ -499,6 +533,7 @@ contract OctraNameService {
   fn set_grace_period(new_grace: int): bool {
     only_admin()
     require(new_grace >= 0, "grace must be >= 0")
+    if self.grace_epochs == new_grace { return true }
     self.grace_epochs = new_grace
     touch_config()
     touch_registry()
@@ -509,6 +544,7 @@ contract OctraNameService {
   nonreentrant fn withdraw_fees(to: address): bool {
     only_admin()
     assert_address(to)
+    require(to != self_addr, "cannot withdraw to self")
     let amount = self.fees_collected
     require(amount > 0, "no fees")
     self.fees_collected = 0
@@ -521,6 +557,8 @@ contract OctraNameService {
   fn propose_ownership(next_owner: address): bool {
     only_admin()
     assert_address(next_owner)
+    require(next_owner != self.owner, "already owner")
+    require(next_owner != self_addr, "contract cannot own itself")
     self.pending_owner = next_owner
     touch_config()
     emit OwnershipProposed(self.owner, next_owner)
@@ -606,6 +644,16 @@ contract OctraNameService {
     require(value == cost, "wrong payment")
     self.fees_collected += cost
     touch_config()
+
+    // A lapsed sale authorization must not revive merely because the owner
+    // renews during grace. Active pre-expiry listings remain intact.
+    let listing_state = self.name_listing_price[label] > 0 || self.name_listing_seller[label] != "" || self.listing_index[label] > 0
+    if epoch > cur_expiry && listing_state {
+      self.name_listing_price[label] = 0
+      self.name_listing_seller[label] = ""
+      listing_remove(label)
+      emit NameUnlisted(label)
+    }
 
     let base_exp = cur_expiry
     if epoch > cur_expiry { base_exp = epoch }
@@ -695,8 +743,10 @@ contract OctraNameService {
 
   fn set_primary(label: string): bool {
     not_paused()
+    require_valid_label(label)
     require(caller == self.name_owner[label], "not owner")
     require(epoch <= self.name_expiry[label], "expired")
+    if self.reverse_primary[caller] == label { return true }
     self.reverse_primary[caller] = label
     touch_owner(caller)
     emit PrimarySet(caller, label)
@@ -705,6 +755,7 @@ contract OctraNameService {
 
   fn unset_primary(): bool {
     not_paused()
+    if self.reverse_primary[caller] == "" { return true }
     self.reverse_primary[caller] = ""
     touch_owner(caller)
     emit PrimaryCleared(caller)
@@ -717,9 +768,14 @@ contract OctraNameService {
     require_valid_sub_label(sub_label)
     assert_address(resolver)
 
-    if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] || self.sub_destination[parent_label][sub_label] == "" {
+    let current_generation = self.name_generation[parent_label]
+    if self.sub_generation[parent_label][sub_label] == current_generation && self.sub_destination[parent_label][sub_label] == resolver && self.sub_index_generation[parent_label][sub_label] == current_generation && self.sub_index[parent_label][sub_label] > 0 {
+      return true
+    }
+
+    if self.sub_generation[parent_label][sub_label] != current_generation || self.sub_destination[parent_label][sub_label] == "" || self.sub_index_generation[parent_label][sub_label] != current_generation || self.sub_index[parent_label][sub_label] <= 0 {
       self.sub_registered_at[parent_label][sub_label] = epoch
-      self.sub_generation[parent_label][sub_label] = self.name_generation[parent_label]
+      self.sub_generation[parent_label][sub_label] = current_generation
       sub_index_add(parent_label, sub_label)
     }
 
@@ -755,6 +811,10 @@ contract OctraNameService {
     require(price > 0, "price must be > 0")
     require(epoch <= self.name_expiry[label], "expired")
 
+    if self.name_listing_price[label] == price && self.name_listing_seller[label] == caller && self.listing_index[label] > 0 {
+      return true
+    }
+
     self.name_listing_price[label]  = price
     self.name_listing_seller[label] = caller
     listing_add(label)
@@ -768,6 +828,7 @@ contract OctraNameService {
 
   fn cancel_listing(label: string): bool {
     not_paused()
+    require_valid_label(label)
     require(caller == self.name_owner[label], "not owner")
     require(self.name_listing_price[label] > 0, "not listed")
 
@@ -781,7 +842,28 @@ contract OctraNameService {
     return true
   }
 
-  payable fn buy_name(label: string, new_destination: string): bool {
+  // Anyone may remove an expired or internally inconsistent listing slot.
+  // This bounds marketplace pagination growth without granting control over
+  // the name, destination, owner index, or reverse record.
+  fn prune_listing(label: string): bool {
+    not_paused()
+    require_valid_label(label)
+    let indexed = self.listing_index[label] > 0
+    let priced = self.name_listing_price[label] > 0
+    let seller = self.name_listing_seller[label]
+    require(indexed || priced || (seller != "" && seller != "0"), "not listed")
+    require(!has_active_listing(label), "listing active")
+
+    self.name_listing_price[label] = 0
+    self.name_listing_seller[label] = ""
+    listing_remove(label)
+    touch_registry()
+    if seller != "" && seller != "0" { touch_owner(seller) }
+    emit NameUnlisted(label)
+    return true
+  }
+
+  payable nonreentrant fn buy_name(label: string, new_destination: string): bool {
     not_paused()
     require_publicly_transferable(label)
     let price = self.name_listing_price[label]
@@ -823,6 +905,7 @@ contract OctraNameService {
   // ─── Views — name ───────────────────────────────────────────────────────
 
   view fn resolve(label: string): address {
+    if !is_valid_label_value(label) { return "0" }
     let exp = self.name_expiry[label]
     if exp == 0 { return "0" }
     if epoch > exp { return "0" }
@@ -833,7 +916,7 @@ contract OctraNameService {
 
   view fn resolve_subdomain(parent_label: string, sub_label: string): address {
     if !is_valid_label_value(parent_label) { return "0" }
-    if !is_valid_label_value(sub_label) { return "0" }
+    if !is_valid_sub_label_value(sub_label) { return "0" }
 
     let exp = self.name_expiry[parent_label]
     if exp == 0 { return "0" }
@@ -846,10 +929,11 @@ contract OctraNameService {
   }
 
   view fn resolve_name(name: string): address {
+    let total = len(name)
+    if total < 3 || total > 127 { return "0" }
     let dot = index_of(name, ".")
     if dot < 0 { return resolve(name) }
 
-    let total = len(name)
     if dot <= 0 { return "0" }
     if dot >= total - 1 { return "0" }
 
@@ -860,18 +944,22 @@ contract OctraNameService {
   }
 
   view fn owner_of(label: string): address {
+    if !is_valid_label_value(label) { return "0" }
     return self.name_owner[label]
   }
 
   view fn expiry_of(label: string): int {
+    if !is_valid_label_value(label) { return 0 }
     return self.name_expiry[label]
   }
 
   view fn registered_at(label: string): int {
+    if !is_valid_label_value(label) { return 0 }
     return self.name_registered_at[label]
   }
 
   view fn destination_of(label: string): string {
+    if !is_valid_label_value(label) { return "" }
     return self.name_destination[label]
   }
 
@@ -884,28 +972,35 @@ contract OctraNameService {
     out = append_int_field(out, self.registry_version)
     out = append_int_field(out, epoch)
     out = append_int_field(out, self.grace_epochs)
+    if !is_valid_label_value(label) { return out }
     return append_name_row(out, label)
   }
 
   view fn subdomain_destination_of(parent_label: string, sub_label: string): string {
+    if !is_valid_label_value(parent_label) { return "" }
+    if !is_valid_sub_label_value(sub_label) { return "" }
     if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return "" }
     return self.sub_destination[parent_label][sub_label]
   }
 
   view fn subdomain_registered_at(parent_label: string, sub_label: string): int {
+    if !is_valid_label_value(parent_label) { return 0 }
+    if !is_valid_sub_label_value(sub_label) { return 0 }
     if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return 0 }
     return self.sub_registered_at[parent_label][sub_label]
   }
 
   view fn subdomain_total(parent_label: string): int {
+    if !is_valid_label_value(parent_label) { return 0 }
     if self.sub_count_generation[parent_label] != self.name_generation[parent_label] { return 0 }
     return self.sub_count[parent_label]
   }
 
   view fn subdomain_key_at(parent_label: string, idx: int): string {
+    if !is_valid_label_value(parent_label) { return "" }
     if self.sub_count_generation[parent_label] != self.name_generation[parent_label] { return "" }
-    require(idx >= 0, "idx < 0")
-    require(idx < self.sub_count[parent_label], "idx out of range")
+    if idx < 0 { return "" }
+    if idx >= self.sub_count[parent_label] { return "" }
     let sub_label = self.sub_keys[parent_label][idx]
     if sub_label == "" { return "" }
     if self.sub_generation[parent_label][sub_label] != self.name_generation[parent_label] { return "" }
@@ -938,12 +1033,14 @@ contract OctraNameService {
   }
 
   view fn is_active(label: string): bool {
+    if !is_valid_label_value(label) { return false }
     let exp = self.name_expiry[label]
     if exp == 0 { return false }
     return epoch <= exp
   }
 
   view fn is_grace(label: string): bool {
+    if !is_valid_label_value(label) { return false }
     let exp = self.name_expiry[label]
     if exp == 0 { return false }
     if epoch <= exp { return false }
@@ -959,10 +1056,12 @@ contract OctraNameService {
   }
 
   view fn listing_price_of(label: string): int {
+    if !has_active_listing(label) { return 0 }
     return self.name_listing_price[label]
   }
 
   view fn listing_seller_of(label: string): address {
+    if !has_active_listing(label) { return "0" }
     return self.name_listing_seller[label]
   }
 
@@ -982,8 +1081,8 @@ contract OctraNameService {
   view fn get_config_snapshot(): string {
     let out = "v1"
     out = append_int_field(out, self.config_version)
-    out = append_address_field(out, self.owner)
-    out = append_address_field(out, self.pending_owner)
+    out = append_field(out, to_string(self.owner))
+    out = append_field(out, to_string(self.pending_owner))
     let paused_value = 0
     if self.paused { paused_value = 1 }
     out = append_int_field(out, paused_value)
@@ -1034,10 +1133,16 @@ contract OctraNameService {
     let i = start
     while i < finish {
       let label = self.listing_keys[i]
+      let seller = self.name_listing_seller[label]
+      let price = self.name_listing_price[label]
+      if !has_active_listing(label) {
+        seller = "0"
+        price = 0
+      }
       out = concat(out, "#")
       out = concat(out, label)
-      out = append_address_field(out, self.name_listing_seller[label])
-      out = append_int_field(out, self.name_listing_price[label])
+      out = append_field(out, to_string(seller))
+      out = append_int_field(out, price)
       i += 1
     }
     return out
@@ -1096,6 +1201,13 @@ contract OctraNameService {
   // Header: v1|subdomain_version|next_cursor|total|epoch|parent_expiry|generation
   // Row:    label|destination|registered_at
   view fn get_subdomain_page(parent_label: string, cursor: int, requested: int, expected_version: int): string {
+    if !is_valid_label_value(parent_label) {
+      let empty = "v1|0|0|0"
+      empty = append_int_field(empty, epoch)
+      empty = append_int_field(empty, 0)
+      empty = append_int_field(empty, 0)
+      return empty
+    }
     let version = self.subdomain_version[parent_label]
     if expected_version >= 0 && expected_version != version {
       return append_int_field("stale", version)
