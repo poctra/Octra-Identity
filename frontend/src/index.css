@@ -1251,9 +1251,14 @@ button.manage-toggle:active:not(:disabled) {
   backdrop-filter: blur(5px);
 }
 
+.tx-progress-backdrop {
+  height: 100vh;
+  height: 100dvh;
+}
+
 .tx-progress-sheet {
   position: relative;
-  flex: 0 1 540px;
+  flex: 0 0 auto;
   width: min(100%, 540px);
   height: auto;
   min-height: 0;
@@ -1621,7 +1626,7 @@ a.wallet-option {
   }
 
   .tx-progress-sheet {
-    flex-basis: auto;
+    flex: 0 0 auto;
     width: 100%;
     max-width: none;
     max-height: min(88vh, 760px);
