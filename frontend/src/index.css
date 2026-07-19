@@ -543,6 +543,62 @@ label > span,
   margin-top: 10px;
 }
 
+.names-filter {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding: 6px 8px 6px 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  animation: screen-enter 180ms ease-out both;
+}
+
+.names-filter > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+}
+
+.names-filter input {
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.names-filter input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.names-filter input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.names-filter-clear {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+
+.names-filter-clear svg {
+  width: 14px;
+  height: 14px;
+}
+
+.names-filter-count {
+  min-width: 24px;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-align: center;
+}
+
 .data-pagination {
   display: flex;
   justify-content: center;

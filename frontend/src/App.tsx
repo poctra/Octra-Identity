@@ -64,6 +64,7 @@ const THEME_KEY = 'octra-id-theme'
 const KNOWN_OWNED_NAMES_KEY = 'octra-id-known-owned-names'
 const OWNER_NAMES_CACHE_KEY = 'octra-id-owner-names-cache'
 const NAMES_RENDER_PAGE_SIZE = 10
+const NAMES_FILTER_THRESHOLD = 50
 
 export default function App() {
   const wallet = useWallet()
@@ -957,11 +958,30 @@ function NamesPanel({
 }) {
   const [expandedLabel, setExpandedLabel] = useState<string | null>(null)
   const [visibleCount, setVisibleCount] = useState(NAMES_RENDER_PAGE_SIZE)
+  const [nameFilter, setNameFilter] = useState('')
+  const normalizedFilter = nameFilter.trim().toLowerCase().replace(/\.oct$/, '')
+  const filteredOwned = useMemo(
+    () => normalizedFilter
+      ? owned.filter((entry) => entry.label.toLowerCase().includes(normalizedFilter))
+      : owned,
+    [normalizedFilter, owned],
+  )
+  const showFilter = owned.length > NAMES_FILTER_THRESHOLD
 
   useEffect(() => {
     setVisibleCount(NAMES_RENDER_PAGE_SIZE)
     setExpandedLabel(null)
+    setNameFilter('')
   }, [address])
+
+  useEffect(() => {
+    setVisibleCount(NAMES_RENDER_PAGE_SIZE)
+    setExpandedLabel(null)
+  }, [nameFilter])
+
+  useEffect(() => {
+    if (!showFilter && nameFilter) setNameFilter('')
+  }, [nameFilter, showFilter])
 
   useEffect(() => {
     if (expandedLabel && !owned.some((entry) => entry.label === expandedLabel)) {
@@ -976,9 +996,11 @@ function NamesPanel({
     content = <LoadingState title="Loading names" text="Fetching names owned by this wallet." />
   } else if (owned.length === 0) {
     content = <EmptyState icon={<UserRound />} title="No owned names" text="Registered names appear here." />
+  } else if (filteredOwned.length === 0) {
+    content = <EmptyState icon={<Search />} title="No matching names" text="Try another name or clear the filter." />
   } else {
-    const visibleNames = owned.slice(0, visibleCount)
-    const hasMore = visibleNames.length < owned.length
+    const visibleNames = filteredOwned.slice(0, visibleCount)
+    const hasMore = visibleNames.length < filteredOwned.length
     content = (
       <>
         {visibleNames.map((entry) => (
@@ -999,11 +1021,11 @@ function NamesPanel({
             <button
               className="data-load-more"
               type="button"
-              onClick={() => setVisibleCount((current) => Math.min(current + NAMES_RENDER_PAGE_SIZE, owned.length))}
+              onClick={() => setVisibleCount((current) => Math.min(current + NAMES_RENDER_PAGE_SIZE, filteredOwned.length))}
             >
               <ChevronDown aria-hidden="true" />
               Load more
-              <span>{visibleNames.length} of {owned.length}</span>
+              <span>{visibleNames.length} of {filteredOwned.length}</span>
             </button>
           </div>
         )}
@@ -1023,6 +1045,26 @@ function NamesPanel({
           <p>Manage destinations, subdomains, renewals, and ownership.</p>
         </div>
       </div>
+      {address && !loading && showFilter && (
+        <div className="names-filter" role="search">
+          <Search aria-hidden="true" />
+          <input
+            type="search"
+            value={nameFilter}
+            onChange={(event) => setNameFilter(event.target.value)}
+            placeholder="Filter your names"
+            aria-label="Filter your names"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {nameFilter && (
+            <button type="button" className="names-filter-clear" onClick={() => setNameFilter('')} aria-label="Clear name filter">
+              <X aria-hidden="true" />
+            </button>
+          )}
+          <span className="names-filter-count">{filteredOwned.length}</span>
+        </div>
+      )}
       {content}
     </section>
   )
