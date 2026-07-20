@@ -1755,4 +1755,12 @@ a.wallet-option {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  html[data-essential-motion="enabled"] .search-progress > span,
+  html[data-essential-motion="enabled"] .loading-state > div,
+  html[data-essential-motion="enabled"] .tx-spinner {
+    animation-duration: 900ms !important;
+    animation-iteration-count: infinite !important;
+    animation-play-state: running !important;
+  }
 }
